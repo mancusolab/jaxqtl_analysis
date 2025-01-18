@@ -1,0 +1,1032 @@
+---
+title: "2_check_sim"
+output: html_document
+date: "2023-10-03"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+# library(qqplotr) # stat_qq_band
+library(data.table)
+library(cowplot)
+library(qvalue)
+
+source("./plot/plot_funcs.R")
+plots_dir <- "../result/sim/figures/"
+  
+gather_res <- function(params_file, 
+                       cols_name=c("num_cells", "libsize", "maf", "beta0", "Va", "Vre", "h2obs"),
+                       fwer=0.05,
+                       subdir = NA){
+
+  if (!is.na(subdir)){
+    res_dir <- paste0("../result/sim/", params_file, "/", subdir, "/")
+  }else{
+    res_dir <- paste0("../result/sim/", params_file, "/")
+  }
+  params <- fread(paste0(paste0("../result/sim/", params_file, "/"), params_file), header=F)
+  colnames(params) <- cols_name
+  params <- params %>% mutate(filename = paste0("sim", 1:nrow(params), ".tsv"))
+  
+  allres <- data.frame()
+  for (i in 1:nrow(params)){
+    which_cell <- params$libsize[i]
+    if (file.exists(paste0(res_dir, which_cell, "/sim", i, ".tsv"))){
+      jqtl_res <- fread(paste0(res_dir, which_cell, "/sim", i, ".tsv"), header=T)
+      allres <- bind_rows(allres, jqtl_res %>% mutate(filename = paste0("sim", i, ".tsv")))
+    }
+  }
+
+  colnames(allres) <- c("nb_wald", "nb_wald_robust", "nb_score", 
+                        "pois_wald", "pois_wald_robust", "pois_score",
+                        "lm_wald", "lm_wald_robust", "lm_score", 
+                        "y_mean", "express_percent", "mean_alpha", "libsize_valid", "filename")
+  allres <- params %>% inner_join(allres,by = "filename")
+  return(allres)
+}
+
+sim_method_cols <- c("glmm_score" = "#009E73",
+                     "glmm_score_spa" = "grey40", 
+                     "Linear" = "#56B4E9", "linear" = "#56B4E9",
+                     "Poisson" = "#CC79A7",
+                     "NegBinom" = "#D55E00", "negbinom" = "#D55E00")
+sim_theme <- theme_classic() + theme(legend.position = "bottom", 
+        strip.text.x = element_text(size = 8),
+        legend.title = element_text(size = 8),
+        legend.text = element_text(size = 8),
+        legend.key.size = unit(0.5, "cm"),
+        plot.title = element_text(size=8, color = "black"),
+        axis.text.x = element_text(size = 8),
+        axis.text.y = element_text(size = 8),
+        axis.title = element_text(size=8))
+n_sim <- 300
+
+sim_celltype <- c("CD4_NC", "B_IN", "Plasma")
+
+```
+
+# INT transformation
+
+```{r}
+library(RNOmni)
+y <- rpois(1000, lambda = 1); mean(y > 0); mean(y)
+hist(y)
+hist(RankNorm(y))
+```
+
+# params_bulk_Va_beta0_alpha
+all genes:
+expression percent
+Min.    1st Qu.  Median  Mean 3rd Qu.    Max. 
+0.01006 0.07637 0.37373 0.44784 0.83081 1.00000
+
+count mean
+Min.   1st Qu.    Median      Mean   3rd Qu.      Max. 
+0.01      0.08      0.58     17.40      3.19 108276.80 
+
+alpha (covariate null model)
+    Min.  1st Qu.   Median     Mean  3rd Qu.     Max. 
+ 0.00000  0.00108  0.02656  0.28845  0.11295 90.03508
+
+Expression percent:
+NB+lm eGenes: mean 0.74 median 0.92
+not any eGenes: mean 0.42 median 0.32
+
+alpha (covariate null model)
+NB+lm eGenes: mean 0.26 median 0.045
+not any eGenes: mean 0.29 median 0.024
+
+```{r main fig}
+# params_bulk_sample_alpha_libsizefix; params_bulk_Va_beta0_alpha_libsizefix
+# three cell types
+allres <- gather_res("params_bulk_celltype_libsize.old",
+                     c("libsize", "maf", "beta0", "Va", "alpha", "N"),
+                     subdir=paste0("NB")); anyNA(allres); # poisson, NB
+
+allres_new <- gather_res("params_bulk_celltype_libsize",
+                     c("libsize", "maf", "beta0", "Va", "alpha", "N"),
+                     subdir=paste0("NB")); anyNA(allres); # poisson, NB
+
+# use the updated CD4_NC results
+allres <- bind_rows(allres %>% filter(libsize != "CD4_NC"),
+          allres_new %>% filter(libsize == "CD4_NC" & beta0 < -11))
+
+nrow(allres) # 3234
+table(allres$libsize); anyNA(allres) 
+
+allres <- allres %>% rename(Poisson=pois_score, NegBinom=nb_score, Linear=lm_score) %>% 
+  distinct(libsize, maf, beta0, Va, alpha, N, .keep_all = T)
+
+unique(allres$Va); unique(allres$beta0); unique(allres$maf); unique(allres$Vre); unique(allres$alpha); unique(allres$num_cells); unique(allres$N)
+
+# mean slope beta around 0.2
+```
+
+### Fix alpha=0.3, N = 1000, MAF = 0.2, change Va and beta0
+
+```{r sample alpha plot N}
+N_filter <- 1000
+n_sim <- 1000
+maf_filter <- 0.2
+
+Va_range <- c(0.01, 0.05, 0.1, 0.5)
+beta0_range <- c(-16, -14, -12, -10)
+
+# N and beta0, across different Va. beta0 = 0 or 1
+for (cell in sim_celltype){
+p1 <- allres %>% 
+  filter(libsize == cell) %>% 
+  filter(N == N_filter & alpha > 0.2 & alpha < 0.4 & maf == maf_filter) %>% 
+  filter(Va < 0.001) %>% 
+  mutate(coverage = round(express_percent*100, digits=2)) %>% 
+  mutate(across(libsize:alpha, ~ as.factor(.x))) %>%
+  select(alpha, maf, Va, beta0, coverage, NegBinom, Poisson, Linear) %>%
+  gather(key = model, value = rej, NegBinom:Linear) %>% 
+  mutate(rej_se = sqrt(rej * (1-rej) / n_sim)) %>% 
+  ggplot(aes(x = coverage, y = rej, color = model, group = model)) +
+  facet_grid(.~Va)+
+  geom_hline(yintercept = 0.05, linetype = "dashed")+ 
+  geom_line(linewidth=0.3) +
+  geom_pointrange(aes(ymin=rej-1.96*rej_se, ymax=rej+1.96*rej_se), 
+                size=0.03, position=position_dodge(0.0), linewidth=0.3) +
+  ylim(0,1)+xlim(0, 100)+
+  ylab("Type I error") + xlab("Coverage (%)") +
+  scale_color_manual(values = sim_method_cols) + sim_theme
+
+assign(paste0("p1_", cell), p1)
+p1
+
+# Va and beta0
+p2 <- allres %>% 
+  filter(libsize == cell) %>% 
+  filter(N == N_filter & alpha > 0.2 & alpha < 0.4 & maf == maf_filter) %>%
+  filter(Va %in% Va_range) %>% 
+  mutate(coverage = round(express_percent*100, digits=2)) %>% 
+  mutate(across(libsize:alpha, ~ as.factor(.x))) %>% 
+  select(alpha, maf, Va, beta0, coverage, NegBinom, Poisson, Linear) %>%
+  gather(key = method, value = rej, NegBinom:Linear) %>% 
+  mutate(rej_se = sqrt(rej * (1-rej) / n_sim)) %>% 
+  ggplot(aes(x = coverage, y = rej, color = method, group = method)) +
+  geom_line(linewidth=0.3) +
+  geom_pointrange(aes(ymin=rej-1.96*rej_se, ymax=rej+1.96*rej_se), 
+                size=0.03, position=position_dodge(0.0), linewidth=0.3) +
+  facet_grid(. ~ Va) + ylab("Power") + xlab("Coverage (%)") + ylim(0, 1)+xlim(0,100)+
+  scale_color_manual(values = sim_method_cols) + sim_theme
+p2
+
+assign(paste0("p2_", cell), p2)
+
+# grid for B_IN
+# legend <- get_legend(p1)
+legend <- cowplot::get_plot_component(p1, 'guide-box-bottom', return_all = TRUE)
+
+grid1 <- plot_grid(
+  p1 + theme(legend.position = "none"), 
+  p2 + theme(legend.position = "none"), 
+  align = 'v',
+  hjust = -1, # -1
+  nrow = 1,
+  rel_heights = c(1, 1), rel_widths=c(1, 3), axis="l"
+)
+
+assign(paste0("grid_", cell), grid1)
+
+}
+```
+
+plot the same thing for CD4_NC and Plasma
+```{r}
+plot_grid(
+  grid_CD4_NC,
+  grid_B_IN,
+  grid_Plasma,
+  legend,
+  align = 'hv',
+  hjust = -0.8,
+  # vjust = 0.1,
+  nrow = 4,
+  rel_heights = c(1, 1, 1, 0.1), rel_widths=c(1, 1, 1, 1), axis="b",
+  labels = c("A", "B", "C"), label_size = 8
+)
+
+ggsave2(paste0(plots_dir, "Fig2_3celltypes.png"),
+    width = full_width, height = full_height*2.2, units = 'cm', dpi = 300)
+
+```
+
+### Figure 2
+choose one cell type and plot together
+```{r}
+CT.lab3 = c(
+  `High (CD4_NC)` = bquote("High (" ~ CD4[NC] ~ ")"), 
+  `Medium (B_IN)` = bquote("High (" ~ B[IN] ~ ")"), 
+  `Low (Plasma)` = bquote("Low (Plasma)")
+)
+
+vlabeller <- function (variable, value) {
+  return(CT.lab3[value])
+}
+
+p1 <- allres %>% 
+  filter(N == N_filter & alpha > 0.2 & alpha < 0.4 & maf == maf_filter & Va < 0.0001) %>% 
+  mutate(coverage = round(express_percent*100, digits=2),
+         libsize = recode(libsize, 
+                          CD4_NC = "High (CD4_NC)",
+                          B_IN = "Medium (B_IN)", 
+                          Plasma = "Low (Plasma)"),
+         libsize = fct_relevel(libsize, c("High (CD4_NC)", "Medium (B_IN)", "Low (Plasma)"))) %>% 
+  select(libsize, alpha, maf, Va, beta0, coverage, negbinom=NegBinom, Poisson, linear=Linear) %>%
+  gather(key = model, value = rej, negbinom:linear) %>% 
+  mutate(rej_se = sqrt(rej * (1-rej) / n_sim)) %>% 
+  ggplot(aes(x = coverage, y = rej, color = model, group = model)) +
+  geom_line(linewidth=0.3) +
+  geom_pointrange(aes(ymin=rej-1.96*rej_se, ymax=rej+1.96*rej_se), 
+                size=0.1, position=position_dodge(0.0), linewidth=0.5) +
+  facet_grid(. ~ libsize, labeller = vlabeller) + 
+  ylab("Type I error") + xlab("Coverage (%)") + ylim(0, 1)+xlim(0,100)+
+  geom_hline(yintercept = 0.05, linetype="dashed", linewidth = 0.3)+
+  scale_color_manual(values = sim_method_cols) + sim_theme + 
+    theme(legend.position.inside = "right",
+        legend.position = c(.99, .95), # for stacked plot in main figure
+        legend.justification = c("right", "top"),
+        legend.box.just = "right",
+        legend.margin = margin(6, 6, 6, 6),
+        legend.key.size = unit(0.4, units = "cm")) 
+p1
+
+p2 <- allres %>% 
+  filter(N == N_filter & alpha > 0.2 & alpha < 0.4 & maf == maf_filter & Va == 0.05) %>% 
+  mutate(coverage = round(express_percent*100, digits=2),
+         libsize = recode(libsize, 
+                          CD4_NC = "High (CD4_NC)", 
+                          B_IN = "Medium (B_IN)", 
+                          Plasma = "Low (Plasma)"),
+         libsize = fct_relevel(libsize, c("High (CD4_NC)", "Medium (B_IN)", "Low (Plasma)"))) %>% 
+  select(libsize, alpha, maf, Va, beta0, coverage, NegBinom, Poisson, Linear) %>%
+  gather(key = model, value = rej, NegBinom:Linear) %>% 
+  mutate(rej_se = sqrt(rej * (1-rej) / n_sim)) %>% 
+  ggplot(aes(x = coverage, y = rej, color = model, group = model)) +
+  geom_line(linewidth=0.3) +
+  geom_pointrange(aes(ymin=rej-1.96*rej_se, ymax=rej+1.96*rej_se), 
+                size=0.1, position=position_dodge(0.0), linewidth=0.5) +
+  facet_grid(. ~ libsize, labeller = vlabeller) + 
+  ylab("Power") + xlab("Coverage (%)") + ylim(0, 1)+xlim(0,100)+
+  scale_color_manual(values = sim_method_cols) + sim_theme + theme(legend.position = "none")
+
+
+plot_grid(
+  p1, p2,
+  align = 'hv',
+  hjust = -0.8,
+  # vjust = 0.1,
+  nrow = 2,
+  rel_heights = c(1, 1), rel_widths=c(1, 1), axis="b",
+  labels = c("A", "B"), label_size = 8
+)
+
+ggsave2(paste0(plots_dir, "Fig2.png"),
+    width = full_width, height = full_height*1.8, units = 'cm', dpi = 300)
+
+p1+theme(legend.position = "bottom")
+ggsave2(paste0(plots_dir, "Fig2_typeI.png"),
+    width = full_width, height = full_height*1.2, units = 'cm', dpi = 300)
+
+p2+theme(legend.position = "bottom")
+ggsave2(paste0(plots_dir, "Fig2_power.png"),
+    width = full_width, height = full_height*1.2, units = 'cm', dpi = 300)
+```
+
+
+# test difference
+```{r}
+cell <- "B_IN"
+tmp <- allres %>% 
+  filter(libsize == cell) %>% 
+  filter(N == N_filter & alpha > 0.2 & alpha < 0.4 & maf == maf_filter & Va == 0.05 & beta0 == -11)
+tmp
+
+cell <- "Plasma"
+tmp <- allres %>% 
+  filter(libsize == cell) %>% 
+  filter(N == N_filter & alpha > 0.2 & alpha < 0.4 & maf == maf_filter & Va == 0.05 & beta0 == -10)
+tmp
+
+rej_nb <- tmp$NegBinom; rej_nb_se2 <- rej_nb * (1-rej_nb) / n_sim
+rej_lm <- tmp$Linear; rej_lm_se2 <- rej_lm * (1-rej_lm) / n_sim
+
+test_stat <- (rej_nb - rej_lm)/sqrt(sum(rej_nb_se2 + rej_lm_se2)); test_stat
+pnorm(abs(test_stat), lower.tail = F)*2
+```
+
+
+### Fix Va, N = 1000, MAF = 0.2, change dispersion and beta0
+
+```{r sample alpha plot N}
+N_filter <- 1000
+maf_filter <- 0.2
+Va_filter <- 0.05
+
+p1 <- allres %>% 
+  filter(libsize == "B_IN") %>% 
+  filter(N == N_filter & maf == maf_filter & beta0 > -16) %>% 
+  filter(Va < 0.001) %>% 
+  group_by(Va, beta0) %>% 
+  mutate(coverage = round(mean(express_percent)*100, digits=2)) %>%
+  ungroup() %>% 
+  # mutate(coverage = scales::label_percent(scale = 1)(coverage),
+  #        coverage = fct_relevel(as.factor(coverage), c("7.5%"))) %>%
+  select(alpha, maf, Va, beta0, coverage, NegBinom, Poisson, Linear) %>%
+  gather(key = method, value = rej, NegBinom:Linear) %>% 
+  mutate(rej_se = sqrt(rej * (1-rej) / n_sim),
+         alpha = as.factor(alpha)) %>% 
+  # ggplot(aes(x = alpha, y = rej, color = method, group = method)) +
+  ggplot(aes(x = coverage, y = rej, color = method, group = method)) +
+  geom_line(linewidth=0.3) +
+  geom_pointrange(aes(ymin=rej-1.96*rej_se, ymax=rej+1.96*rej_se), 
+                size=0.03, position=position_dodge(0.0), linewidth=0.3)+
+  geom_hline(yintercept = 0.05, linetype = "dashed")+ ylim(0,1)+
+  facet_grid(.~alpha)+ 
+  ylab("Type I error") +xlab("coverage (%)")+
+  scale_color_manual(values = sim_method_cols) + sim_theme
+p1
+
+# Va and beta0
+p2 <- allres %>% 
+  filter(libsize == "B_IN") %>% 
+  filter(N == N_filter & Va == Va_filter & maf == maf_filter & beta0 > -16) %>%
+  group_by(Va, beta0) %>% 
+  mutate(coverage = round(mean(express_percent)*100, digits=2)) %>%
+  ungroup() %>% 
+  # mutate(coverage = scales::label_percent(scale = 1)(coverage),
+  #        coverage = fct_relevel(as.factor(coverage), c("6.8%"))) %>% 
+  select(alpha, maf, Va, beta0, coverage, NegBinom, Poisson, Linear) %>%
+  gather(key = method, value = rej, NegBinom:Linear) %>% 
+  mutate(rej_se = sqrt(rej * (1-rej) / n_sim),
+         alpha = as.factor(alpha)) %>% 
+  ggplot(aes(x = coverage, y = rej, color = method, group = method)) +
+  geom_line(linewidth=0.3) +
+  geom_pointrange(aes(ymin=rej-1.96*rej_se, ymax=rej+1.96*rej_se), 
+                size=0.03, position=position_dodge(0.0), linewidth=0.3)+
+  facet_grid(.~alpha)+
+  ylab("Power") + ylim(0,1)+xlab("coverage (%)")+
+  scale_color_manual(values = sim_method_cols) + sim_theme
+p2
+
+legend <- get_legend(p1)
+# legend <- cowplot::get_plot_component(p1, 'guide-box-bottom', return_all = TRUE)
+
+plot_grid(
+  p1 + theme(legend.position = "none"), 
+  p2 + theme(legend.position = "none"), 
+  legend,
+  align = 'v',
+  hjust = -0.8,
+  # vjust = 0.1,
+  nrow = 3,
+  rel_heights = c(1, 1, 0.1), rel_widths=c(1, 1, 1), axis="b",
+  labels = c("A", "B", ""), label_size = 8
+)
+
+ggsave2(paste0(plots_dir, "sim_B_IN_N1k_maf0.2_Va", Va_filter, ".png"),
+    width = full_width, height = full_height*1.5, units = 'cm', dpi = 300)
+
+```
+
+### Fix Va, alpha=0.3, MAF = 0.2, change N and beta0
+
+```{r sample alpha plot N}
+maf_filter <- 0.2
+Va_filter <- 0.05
+
+p1 <- allres %>% 
+  filter(libsize == "B_IN") %>% 
+  filter(alpha > 0.2 & alpha < 0.4 & maf == maf_filter & beta0 > -16) %>%
+  filter(Va < 0.001) %>% 
+  group_by(beta0) %>% 
+  mutate(coverage = round(mean(express_percent)*100, digits=2)) %>%
+  ungroup() %>% 
+  # mutate(coverage = scales::label_percent(scale = 1)(coverage),
+  #        coverage = fct_relevel(as.factor(coverage), c("6.4%"))) %>%
+  select(alpha, maf, Va, beta0, N, coverage, NegBinom, Poisson, Linear) %>%
+  gather(key = method, value = rej, NegBinom:Linear) %>% 
+  mutate(rej_se = sqrt(rej * (1-rej) / n_sim),
+         N = as.factor(N)) %>% 
+  ggplot(aes(x = coverage, y = rej, color = method, group = method)) +
+  geom_line(linewidth=0.3) +
+  geom_pointrange(aes(ymin=rej-1.96*rej_se, ymax=rej+1.96*rej_se), 
+                size=0.03, position=position_dodge(0.0), linewidth=0.3)+
+  ylab("Type I error") +
+  facet_grid(.~N)+
+  geom_hline(yintercept = 0.05, linetype = "dashed")+ ylim(0,1)+xlab("coverage (%)")+
+  scale_color_manual(values = sim_method_cols) + sim_theme
+p1
+
+# Va and beta0
+p2 <- allres %>% 
+  filter(libsize == "B_IN") %>% 
+  filter(alpha > 0.2 & alpha < 0.4 & maf == maf_filter & Va == Va_filter & beta0 > -16) %>%
+  group_by(beta0) %>% 
+  mutate(coverage = round(mean(express_percent)*100, digits=2)) %>% 
+  ungroup() %>% 
+  # mutate(coverage = scales::label_percent(scale = 1)(coverage),
+  #        coverage = fct_relevel(as.factor(coverage), c("4.9%"))) %>%
+  select(alpha, maf, Va, beta0, N, coverage, NegBinom, Poisson, Linear) %>%
+  gather(key = method, value = rej, NegBinom:Linear) %>% 
+  mutate(rej_se = sqrt(rej * (1-rej) / n_sim),
+         N = as.factor(N)) %>% 
+  ggplot(aes(x = coverage, y = rej, color = method, group = method)) +
+  geom_line(linewidth=0.3) +
+  geom_pointrange(aes(ymin=rej-1.96*rej_se, ymax=rej+1.96*rej_se), 
+                size=0.03, position=position_dodge(0.0), linewidth=0.3)+
+  facet_grid(. ~ N) + 
+  ylab("Power") + ylim(0,1)+ xlab("coverage (%)")+
+  scale_color_manual(values = sim_method_cols) + sim_theme
+p2
+
+legend <- get_legend(p1)
+# legend <- cowplot::get_plot_component(p1, 'guide-box-bottom', return_all = TRUE)
+
+plot_grid(
+  p1 + theme(legend.position = "none"), 
+  p2 + theme(legend.position = "none"), 
+  legend,
+  align = 'v',
+  hjust = -0.8,
+  # vjust = 0.1,
+  nrow = 3,
+  rel_heights = c(1, 1, 0.1), rel_widths=c(1, 1, 1), axis="b",
+  labels = c("A", "B", ""), label_size = 8
+)
+ggsave2(paste0(plots_dir, "sim_B_IN_maf0.2_alpha0.3_Va", Va_filter, ".png"),
+    width = full_width, height = full_height*1.5, units = 'cm', dpi = 300)
+
+```
+
+# change MAF (fix Va=0.05)
+```{r}
+allres <- gather_res("params_bulk_celltype_libsize_maf",
+                     c("libsize", "maf", "beta0", "Va", "alpha", "N"),
+                     subdir=paste0("NB")); anyNA(allres); # poisson, NB
+
+nrow(allres) # 3234
+table(allres$libsize); anyNA(allres) 
+
+allres <- allres %>% rename(Poisson=pois_score, NegBinom=nb_score, Linear=lm_score) %>% 
+  distinct(libsize, maf, beta0, Va, alpha, N, .keep_all = T)
+
+N_filter <- 1000
+Va_filter <- 0.05
+
+p1 <- allres %>% 
+  filter(libsize == "B_IN") %>% 
+  filter(alpha > 0.2 & alpha < 0.4 & N == N_filter & beta0 > -16) %>%
+  filter(Va < 0.0001) %>% 
+  group_by(beta0) %>% 
+  mutate(coverage = round(mean(express_percent)*100, digits=2)) %>% 
+  ungroup() %>% 
+  # mutate(coverage = scales::label_percent(scale = 1)(coverage),
+  #        coverage = fct_relevel(as.factor(coverage), c("6.9%"))) %>%
+  select(alpha, maf, Va, beta0, N, coverage, NegBinom, Poisson, Linear) %>%
+  gather(key = method, value = rej, NegBinom:Linear) %>% 
+  mutate(rej_se = sqrt(rej * (1-rej) / n_sim),
+         maf = as.factor(maf)) %>% 
+  ggplot(aes(x = coverage, y = rej, color = method, group = method)) +
+  geom_line(linewidth=0.3) +
+  geom_pointrange(aes(ymin=rej-1.96*rej_se, ymax=rej+1.96*rej_se), 
+                size=0.03, position=position_dodge(0.0), linewidth=0.3) +
+  facet_grid(.~maf)+
+  geom_hline(yintercept = 0.05, linetype = "dashed")+ 
+  ylim(0,1)+ ylab("Type I error") +xlab("coverage (%)")+
+  scale_color_manual(values = sim_method_cols) + sim_theme
+p1
+
+# Va and beta0
+p2 <- allres %>% 
+  filter(libsize == "B_IN") %>% 
+  filter(alpha > 0.2 & alpha < 0.4 & N == N_filter & Va == Va_filter & beta0 > -16) %>% 
+  group_by(beta0) %>% 
+  mutate(coverage = round(mean(express_percent)*100, digits=2)) %>% 
+  ungroup() %>% 
+  # mutate(coverage = scales::label_percent(scale = 1)(coverage),
+  #        coverage = fct_relevel(as.factor(coverage), c("6.8%"))) %>%
+  select(alpha, maf, Va, beta0, N, coverage, NegBinom, Poisson, Linear) %>%
+  gather(key = method, value = rej, NegBinom:Linear) %>% 
+  mutate(rej_se = sqrt(rej * (1-rej) / n_sim),
+         maf = as.factor(maf)) %>% 
+  ggplot(aes(x = coverage, y = rej, color = method, group = method)) +
+  geom_line(linewidth=0.3) +
+  geom_pointrange(aes(ymin=rej-1.96*rej_se, ymax=rej+1.96*rej_se), 
+                size=0.03, position=position_dodge(0.0), linewidth=0.3) +
+  facet_grid(. ~ maf) + 
+  ylab("Power") + ylim(0,1)+xlab("coverage (%)")+
+  scale_color_manual(values = sim_method_cols) + sim_theme
+p2
+
+plot_grid(
+  p1 + theme(legend.position = "none"), 
+  p2 + theme(legend.position = "none"), 
+  legend,
+  align = 'v',
+  hjust = -0.8,
+  # vjust = 0.1,
+  nrow = 3,
+  rel_heights = c(1, 1, 0.1), rel_widths=c(1, 1, 1), axis="b",
+  labels = c("A", "B", ""), label_size = 8
+)
+
+ggsave2(paste0(plots_dir, "sim_B_IN_N1k_alpha0.3_Va", Va_filter, ".png"),
+    width = full_width, height = full_height*1.5, units = 'cm', dpi = 300)
+
+```
+
+
+# Poisson: model misspecification
+```{r}
+allres <- gather_res("params_bulk_celltype_libsize",
+                     c("libsize", "maf", "beta0", "Va", "alpha", "N"),
+                     subdir=paste0("poisson")); anyNA(allres); # poisson, NB
+allres <- allres %>% rename(Poisson=pois_score, NegBinom=nb_score, Linear=lm_score) %>% 
+  distinct(libsize, maf, beta0, Va, alpha, N, .keep_all = T)
+# back to creating grid
+
+plot_grid(
+  grid_CD4_NC,
+  grid_B_IN,
+  grid_Plasma,
+  legend,
+  align = 'v',
+  hjust = -0.8,
+  nrow = 4,
+  rel_heights = c(1, 1, 1, 0.1), rel_widths=c(1, 1, 1, 1), axis="l",
+  labels = c("A", "B", "C"), label_size = 8
+)
+
+ggsave2(paste0(plots_dir, "sim_poisson.png"),
+    width = full_width, height = full_height*2, units = 'cm', dpi = 300)
+
+```
+
+# permutation real data for gene-level p value
+
+```{r}
+indir <- "../result/cis/celltype16_new_fixalpha_perm/all_celltype/"
+sim_celltype
+
+perm_res <- data.frame()
+for (cell in sim_celltype){
+  for (model in c("nb", "lm", "pois")){
+     tmp <- fread(paste0(indir, "jaxqtl_allres_cis_score.newbeta.", model, ".threshold0.01.", cell, ".leadsnp.tsv.gz"))
+  perm_res <- bind_rows(perm_res, tmp %>% mutate(celltype = cell, model = model))
+  }
+}
+
+hist(perm_B_IN$pval_beta)
+
+# one extreme value from NB in B_IN
+perm_res %>% filter(model == "nb" & celltype == "B_IN") %>% arrange(pval_beta) %>% View
+
+perm_res %>% filter(model == "pois" & celltype == "CD4_NC") %>% ggplot(aes(x = pval_beta)) + geom_histogram()
+
+
+perm_res %>% 
+  mutate(chisq = qchisq(1-pval_beta,1),
+         model = case_when(model == "nb" ~ "NegBinom",
+                           model == "pois" ~ "Poisson",
+                           model == "lm" ~ "Linear")) %>% 
+  group_by(model, celltype) %>%
+  mutate(lamb = round(median(chisq)/qchisq(0.5,1), 2)) %>%
+         # ks_res = (ks.test(pval_beta, "punif", 0, 1))$p.value) %>% distinct(model, celltype, lamb, ks_res) %>%
+  ungroup() %>%
+  ggplot(aes(sample = -log(pval_beta))) + 
+  stat_qq(distribution = qexp, size=0.5)+
+  stat_qq_line(distribution = qexp, color = "blue")+
+  qqplotr::stat_qq_band(distribution = "exp", alpha = 0.5)+
+  facet_grid(model ~ celltype) +
+  geom_text(
+    size    = 3,
+    mapping = aes(x = Inf, y = Inf, label = paste0("lambda: ", lamb)),
+    hjust   = 4,
+    vjust   = 2,
+    parse = TRUE
+  )+
+  xlab("theoretical") + ylab("observed -log(p)") +
+  axis_theme + ggtitle("gene-level p value") + theme_bw() 
+
+ggsave2(paste0(plots_dir, "realdata_perm.png"),
+    width = full_width, height = full_height*2, units = 'cm', dpi = 300)
+
+```
+
+
+# read results
+
+```{r}
+indir <- "../result/sim/NB_nocov/"
+allres_null <- read_tsv(paste0(indir, "sim_all_null_beta0_threshold.new.tsv")) %>% 
+  mutate(mean_baseline = exp(beta0)) %>% 
+  filter(threshold != 1)
+allres_alt <- read_tsv(paste0(indir, "sim_all_alt_beta0_threshold.new.tsv")) %>% 
+  mutate(mean_baseline = exp(beta0)) %>% 
+  filter(threshold != 1)
+    
+
+colnames(allres_null) <- gsub("rej_|rej_pval_", "",colnames(allres_null))
+colnames(allres_null) <- gsub("nb", "NegBinom",colnames(allres_null))
+
+allres_null <- allres_null %>% gather(key = method, value = rej, NegBinom_wald:NegBinom_score_thr)
+
+colnames(allres_alt) <- gsub("rej_|rej_pval_", "",colnames(allres_alt))
+colnames(allres_alt) <- gsub("nb", "NegBinom",colnames(allres_alt))
+
+allres_alt <- allres_alt %>% gather(key = method, value = rej, NegBinom_wald:NegBinom_score_thr)
+```
+
+
+# plot
+
+```{r}
+unique(allres_null$method)
+unique(allres_null$beta0)
+unique(allres_null$threshold)
+unique(allres_null$maf)
+jaxqtl_threshold <- 0.01
+beta0_threshold <- 6
+maf_threshold <- 0.2
+```
+
+## under null
+choose threshold
+```{r}
+alpha_val <- 0.6
+allres_null %>% 
+  mutate(rej = ifelse(is.na(rej), 0, rej)) %>% 
+  filter(beta0 <= beta0_threshold & alpha == alpha_val) %>% 
+  filter(method %in% c("NegBinom_score_thr", "NegBinom_score")) %>%
+  ggplot(aes(x = mean_baseline, y = rej, color = method))+
+  geom_point(size=0.7) + geom_line() +
+  geom_hline(yintercept = 0.05, linetype = "dashed")+
+  scale_color_manual(values = sim_method_cols) +
+  facet_grid(. ~ threshold) +
+    axis_theme +
+  theme(legend.position = "bottom") +
+  ggtitle("Type I error across mean baseline count for fixed threshold")
+ggsave2(paste0(plots_dir, "rej_null_jaxqtl_beta0_", beta0_threshold,"_alpha_",alpha_val, ".png"),
+    width = full_width, height = full_height, units = 'cm', dpi = 300)
+
+alpha_val <- 0.6
+
+allres_alt %>% 
+  mutate(rej = ifelse(is.na(rej), 0, rej)) %>% 
+  filter(beta > 0) %>% 
+  filter(beta0 <= beta0_threshold & alpha == alpha_val, maf == maf_threshold) %>%
+  filter(method %in% c("pois_score","lm", "NegBinom_score")) %>%
+  ggplot(aes(x = mean_baseline, y = rej, color = method))+
+  geom_point(size=0.7) + geom_line() +
+  scale_color_manual(values = sim_method_cols) +
+  facet_grid(. ~ beta) +
+    axis_theme +
+  theme(legend.position = "bottom") +
+  ggtitle(paste0("Power across true eQTL effect size and true alpha=",alpha_val))
+
+ggsave2(paste0(plots_dir, "rej_alt_jaxqtl_alpha_",alpha_val, "_maf", maf_threshold, ".png"),
+    width = full_width, height = full_height, units = 'cm', dpi = 300)
+
+```
+
+## all null
+
+```{r}
+beta0_threshold <- 4
+maf_threshold <- 0.2
+
+allres_null %>% 
+  mutate(rej = ifelse(is.na(rej), 0, rej)) %>% 
+  filter(beta0 <= beta0_threshold & maf == maf_threshold) %>% 
+  filter(method %in% c("pois_score","lm", "NegBinom_score")) %>%
+  ggplot(aes(x = mean_baseline, y = rej, color = method))+
+  geom_point(size=0.7) + geom_line() +
+  geom_hline(yintercept = 0.05, linetype = "dashed")+
+  scale_color_manual(values = sim_method_cols) +
+  facet_grid(. ~ alpha) +
+  axis_theme +
+  theme(legend.position = "bottom") +
+  ggtitle("Type I error across mean baseline count for fixed dispersion alpha")
+ggsave2(paste0(plots_dir, "rej_null_jaxqtl_maf", maf_threshold, ".png"),
+    width = full_width, height = full_height, units = 'cm', dpi = 300)
+
+```
+
+### all alt
+
+```{r}
+unique(allres_alt$beta0)
+unique(allres_alt$beta)
+unique(allres_alt$alpha)
+true_beta <- 0.05
+beta0_threshold <- 4
+maf_threshold <- 0.2
+
+allres_alt %>% 
+  mutate(rej = ifelse(is.na(rej), 0, rej)) %>% 
+  filter(beta == true_beta & beta0 <= beta0_threshold & maf == maf_threshold) %>% 
+  filter(method %in% c("pois_score","lm", "NegBinom_score")) %>%
+  ggplot(aes(x = mean_baseline, y = rej, color = method))+
+  geom_point(size=0.7) + geom_line() +
+  scale_color_manual(values = sim_method_cols) +
+  facet_grid(. ~ alpha) +
+  axis_theme +
+  theme(legend.position = "bottom") +
+  ggtitle(paste0("Power across mean baseline count for fixed true dispersion alpha and true beta = ", true_beta))
+ggsave2(paste0(plots_dir, "rej_alt_", true_beta, "_maf", maf_threshold, "_beta0", beta0_threshold, ".png"),
+    width = full_width, height = full_height, units = 'cm', dpi = 300)
+
+alpha_val <- 0.4
+allres_alt %>% 
+  mutate(rej = ifelse(is.na(rej), 0, rej)) %>% 
+  filter(beta0 <= 2 & alpha == alpha_val & maf == 0.2) %>% 
+  filter(method %in% c("lm", "NegBinom_score")) %>%
+  ggplot(aes(x = mean_baseline, y = rej, color = method))+
+  geom_point(size=0.7) + geom_line() +
+  scale_color_manual(values = sim_method_cols) +
+  facet_grid(. ~ beta) +
+  axis_theme +
+  theme(legend.position = "bottom") +
+  ggtitle(paste0("Power across mean baseline count for varying true SNP effect size"))
+ggsave2(paste0(plots_dir, "rej_alt_vary_beta_alpha", alpha_val, ".png"),
+    width = full_width, height = full_height, units = 'cm', dpi = 300)
+
+```
+
+# single cell model
+
+## params_eqtl_beta
+
+```{r}
+allres <- gather_res("params_eqtl_beta",
+                     c("maf", "m_causal", "Va", "Vre", "eqtl_beta"))
+
+allres %>% 
+  select(eqtl_beta, nb_score, pois_score, lm_wald, glmm_score_spa, glmm_score) %>% 
+  gather(key = method, value = rej, nb_score:glmm_score) %>% 
+  ggplot(aes(x = eqtl_beta, y = rej, color = method))+
+  geom_point(size=0.7) + geom_line() +
+  axis_theme +
+  theme(legend.position = "right") +
+  ggtitle(paste0("rejection rate across fixed eqtl effect (Vre = 0.2)"))
+
+ggsave2(paste0(plots_dir, "rej_alt_", true_beta, "_maf", maf_threshold, "_beta0", beta0_threshold, ".png"),
+    width = full_width, height = full_height, units = 'cm', dpi = 300)
+```
+
+
+## params_Va_Ve
+
+```{r}
+allres <- gather_res("params_Va_Vre_maf",
+                     c("maf", "m_causal", "Va", "Vre", "h2obs"))
+
+allres %>% 
+  ggplot(aes(x = h2obs, y = glmm_Vre)) + 
+  geom_point(size=0.7) + axis_theme +
+  geom_smooth(method = "lm") +
+  geom_hline(yintercept = 0.2, linetype = "dashed") +
+  ggtitle("Vre estimates (mean) vs. h2obs")
+
+ggsave2(paste0(plots_dir, "Vre_h2obs.png"),
+    width = onecol_width, height = onecol_height, units = 'cm', dpi = 300)
+
+
+allres %>% 
+  select(maf, Va, Vre, h2obs, NegBinom_score=nb_score, pois_score, lm_wald, glmm_score_spa, glmm_score) %>% 
+  gather(key = method, value = rej, NegBinom_score:glmm_score) %>% 
+  # filter(method != "pois_score") %>%
+  ggplot(aes(x = h2obs, y = rej, color = method))+
+  geom_point(size=0.7) + geom_line(linewidth=0.3) +
+  scale_color_manual(values = sim_method_cols) +
+  facet_grid(. ~ maf) +
+  axis_theme +
+  geom_hline(yintercept = 0.05, linetype = "dashed") +
+  theme(legend.position = "right", 
+        legend.title = element_text(size = 8),
+        legend.text = element_text(size = 8)) +
+  ggtitle(paste0("Rejection rate at p<0.05 across h2obs, by diff MAF"))
+
+ggsave2(paste0(plots_dir, "rej_h2obs_maf_typeIerror.png"),
+    width = onecol_width*1.4, height = onecol_height, units = 'cm', dpi = 300)
+
+``` 
+
+# different baseline: params_beta0
+
+```{r}
+res_dir <- paste0("../result/sim/params_beta0/")
+mean_ct <- fread(paste0(res_dir, "mean_ct.tsv.gz"))
+
+mean_ct %>% filter(X4 == -3 & X6 == 0) %>% 
+  mutate(mean_pt = mean(mean_ct)) %>% 
+  ggplot(aes(x=mean_ct)) + geom_histogram() +
+  geom_vline(aes(xintercept = mean_pt), color = "blue")+
+  axis_theme +
+  ggtitle(aes("beta0=-3, Vre=0"))
+
+mean_ct %>% 
+  rename(Vre = X6) %>% 
+  filter(Vre == 1 | Vre == 0 | Vre == 4) %>% 
+  mutate(beta0=factor(X4)) %>% 
+  ggplot(aes(x = beta0, y = mean_ct)) + geom_boxplot() +
+  facet_grid(. ~ Vre) +
+  axis_theme +
+  ggtitle("mean counts in pseudobulk data across baseline beta0")
+
+ggsave2(paste0(plots_dir, "mean_ct_byVre.png"),
+    width = full_width, height = full_height, units = 'cm', dpi = 300)
+
+
+allres <- gather_res("params_beta0")
+unique(allres$Va); unique(allres$Vre)
+
+allres %>% 
+  mutate(h2obs = round(h2obs, 3)) %>% 
+  filter(Vre < 4) %>%
+  select(beta0, Va, Vre, h2obs, NegBinom_score=nb_score, pois_score, lm_wald, glmm_score_spa, glmm_score) %>% 
+  gather(key = method, value = rej, NegBinom_score:glmm_score) %>% 
+  ggplot(aes(x = Vre, y = rej, color = method))+
+  geom_point(size=0.7) + geom_line(linewidth=0.3) +
+  scale_color_manual(values = sim_method_cols) +
+  facet_grid(. ~ beta0) +
+  axis_theme +
+  theme(legend.position = "right", 
+        legend.title = element_text(size = 8),
+        legend.text = element_text(size = 8)) +
+  ggtitle(paste0("Rejection rate at p<0.05 across beta0, by h2obs"))
+
+ggsave2(paste0(plots_dir, "rej_beta0_byh2obs.png"),
+    width = onecol_width*2, height = onecol_height, units = 'cm', dpi = 300)
+
+```
+
+# params_Vre
+
+```{r}
+allres <- gather_res("params_Vre")
+unique(allres$h2obs)
+
+allres %>% 
+  # filter(Vre < 4) %>% 
+  select(Va, Vre, h2obs, NegBinom_score=nb_score, pois_score, lm_wald, glmm_score_spa, glmm_score) %>% 
+  gather(key = method, value = rej, NegBinom_score:glmm_score) %>% 
+  # filter(method != "pois_score") %>%
+  ggplot(aes(x = h2obs, y = rej, color = method))+
+  geom_point(size=0.7) + geom_line(linewidth=0.3) +
+  scale_color_manual(values = sim_method_cols) +
+  facet_grid(. ~ Va) +
+  axis_theme +
+  theme(legend.position = "right", 
+        legend.title = element_text(size = 8),
+        legend.text = element_text(size = 8)) +
+  ggtitle(paste0("Rejection rate at p<0.05 across h2obs, by Va"))
+
+ggsave2(paste0(plots_dir, "rej_Vre.png"),
+    width = onecol_width*1.4, height = onecol_height, units = 'cm', dpi = 300)
+
+```
+
+# params_Va
+
+```{r}
+allres <- gather_res("params_Va")
+unique(allres$Va); unique(allres$num_cells); unique(allres$maf);
+
+allres %>% 
+  filter(Vre != 4 & Va > 0) %>%
+  select(Va, Vre, h2obs, NegBinom_score=nb_score, pois_score, lm_wald, glmm_score_spa, glmm_score) %>% 
+  gather(key = method, value = rej, NegBinom_score:glmm_score) %>% 
+  ggplot(aes(x = h2obs, y = rej, color = method))+
+  geom_point(size=0.7) + geom_line(linewidth=0.3) +
+  scale_color_manual(values = sim_method_cols) +
+  facet_grid(. ~ Vre) +
+  axis_theme +
+  theme(legend.position = "right", 
+        legend.title = element_text(size = 8),
+        legend.text = element_text(size = 8)) +
+  ggtitle(paste0("Rejection rate at p<0.05 across h2obs, by Vre"))
+
+ggsave2(paste0(plots_dir, "rej_Va_byVre_noVa0.png"),
+    width = onecol_width*1.4, height = onecol_height, units = 'cm', dpi = 300)
+```
+
+# params_num_cells
+
+```{r}
+allres <- gather_res("params_num_cells")
+unique(allres$Va); unique(allres$num_cells); unique(allres$maf);
+
+allres %>% 
+  filter(maf == 0.2) %>% 
+  mutate(h2obs = round(h2obs, 3)) %>% 
+  select(num_cells, Va, Vre, h2obs, NegBinom_score=nb_score, pois_score, lm_wald, glmm_score_spa, glmm_score) %>% 
+  gather(key = method, value = rej, NegBinom_score:glmm_score) %>% 
+  ggplot(aes(x = num_cells, y = rej, color = method))+
+  geom_point(size=0.5) + geom_line(linewidth=0.2) +
+  scale_color_manual(values = sim_method_cols) +
+  facet_grid(. ~ h2obs) +
+  axis_theme +
+  theme(legend.position = "right", 
+        legend.title = element_text(size = 8),
+        legend.text = element_text(size = 8),
+        axis.text.x = element_text(size = 6, angle=30)) +
+  ggtitle(paste0("Rejection rate at p<0.05 across #cells, by h2obs"))
+
+ggsave2(paste0(plots_dir, "rej_num_cells_byh2obs.png"),
+    width = onecol_width*2, height = onecol_height, units = 'cm', dpi = 300)
+```
+
+
+# params_type1
+
+```{r}
+allres <- gather_res("params_type1")
+unique(allres$Va); unique(allres$num_cells); unique(allres$maf); unique(allres$Vre)
+
+allres %>% 
+  filter(maf %in% c(0.05, 0.2, 0.5)) %>%
+  filter(Vre < 4) %>%
+  select(num_cells, maf, Va, Vre, h2obs, NegBinom_score=nb_score, pois_score, lm_wald, glmm_score_spa, glmm_score) %>% 
+  gather(key = method, value = rej, NegBinom_score:glmm_score) %>% 
+  # filter(method != "pois_score") %>%
+  ggplot(aes(x = Vre, y = rej, color = method))+
+  geom_point(size=0.7) + geom_line(linewidth=0.3) +
+  scale_color_manual(values = sim_method_cols) +
+  facet_grid(. ~ maf) +
+  geom_hline(yintercept = 0.05, linetype = "dashed") +
+  axis_theme +
+  theme(legend.position = "right", 
+        legend.title = element_text(size = 8),
+        legend.text = element_text(size = 8),
+        axis.text.x = element_text(size = 6, angle=30))+
+  ggtitle(paste0("Rejection rate at p<0.05 across Vre, by diff MAF"))
+
+ggsave2(paste0(plots_dir, "rej_typeIerror_byMAF.png"),
+    width = onecol_width*1.4, height = onecol_height, units = 'cm', dpi = 300)
+```
+
+
+# params_Va_Vre_cells_beta0
+
+```{r}
+allres <- gather_res("params_Va_Vre_cells_beta0_more")
+unique(allres$Va); unique(allres$num_cells); unique(allres$maf); unique(allres$Vre); 
+
+allres %>% 
+  mutate(across(num_cells:Vre, ~ as.factor(.x))) %>% 
+  filter(num_cells == 100 & Va == 0.1 & h2obs > 0) %>%
+  select(num_cells, maf, Va, Vre, h2obs, beta0, NegBinom_score=nb_score, pois_score, lm_wald, glmm_score_spa, glmm_score) %>% 
+  gather(key = method, value = rej, NegBinom_score:glmm_score) %>% 
+  # filter(method != "pois_score") %>%
+  ggplot(aes(x = h2obs, y = rej, color = method, group=method))+
+  geom_point(size=0.5) + geom_line(linewidth=0.3) +
+  scale_color_manual(values = sim_method_cols) +
+  facet_grid(. ~ beta0) +
+  axis_theme +
+  theme(legend.position = "right", 
+        legend.title = element_text(size = 8),
+        legend.text = element_text(size = 8),
+        axis.text.x = element_text(size = 6, angle=30))+
+  ggtitle(paste0("Rejection rate at p<0.05 across h2obs, by diff baseline"))
+
+ggsave2(paste0(plots_dir, "sc_rej_byh2obs_100cells_Va0.1.png"),
+    width = full_width, height = full_height, units = 'cm', dpi = 300)
+
+
+# type I error
+allres %>% 
+  filter(Va < 0.01 & num_cells == 100) %>%
+  select(num_cells, maf, Va, Vre, h2obs, beta0, NegBinom_score=nb_score, pois_score, lm_wald, glmm_score_spa, glmm_score) %>% 
+  gather(key = method, value = rej, NegBinom_score:glmm_score) %>% 
+  ggplot(aes(x = Vre, y = rej, color = method))+
+  geom_point(size=0.5) + geom_line(linewidth=0.3) +
+  scale_color_manual(values = sim_method_cols) +
+  facet_grid(. ~ beta0) +
+  geom_hline(yintercept = 0.05, linetype = "dashed") +
+  axis_theme +
+  theme(legend.position = "right", 
+        legend.title = element_text(size = 8),
+        legend.text = element_text(size = 8),
+        axis.text.x = element_text(size = 8, angle=30))+
+  ggtitle(paste0("Rejection rate at p<0.05 across Vre, by diff baseline intercept"))
+
+ggsave2(paste0(plots_dir, "sc_rej_typeIerror_bybeta0.png"),
+    width = full_width, height = full_height, units = 'cm', dpi = 300)
+
+```
+
+
+# check varpois
+
+sim6_gene10_varpois.tsv.gz
+sim6_libsize1.pheno10_sqtl_causal_snp 
+
+

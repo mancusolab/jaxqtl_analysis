@@ -1,0 +1,18 @@
+# workflow in fine-mapping
+
+1. calculate LD matrix
+/project/nmancuso_8/elezhang/projects/jaxqtl/code/cis_mapping/run_jaxqtl_cis_est_ld.nb.sh
+
+2. perform fine-mapping using susieR
+
+after fine-mapping on eGenes:
+
+/project/nmancuso_8/elezhang/projects/jaxqtl/result/finemap/code/run_susie.sh/run_susie_tqtl.sh
+
+3. for each gene, run regression of pip on LD score of annotation
+/project/nmancuso_8/elezhang/projects/jaxqtl/code/enrich/enrich_annot_sm.py
+
+Next two steps are independent
+4. use count_cs.R to count number of credible sets
+
+5. use make_finemap_bed.R to gather snps with PIP > threshold

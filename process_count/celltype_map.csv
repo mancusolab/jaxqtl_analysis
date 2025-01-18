@@ -1,0 +1,14 @@
+CD4 NC,'central memory CD4-positive, alpha-beta T cell', 'naive thymus-derived CD4-positive, alpha-beta T cell'
+CD4 ET,'effector memory CD4-positive, alpha-beta T cell'
+CD4 SOX4,'CD4-positive, alpha-beta cytotoxic T cell'
+CD8 ET,'effector memory CD8-positive, alpha-beta T cell'
+CD8 NC,'naive thymus-derived CD8-positive, alpha-beta T cell','central memory CD8-positive, alpha-beta T cell'
+CD8 100B,?
+NK,
+NK R,
+Plasma,'plasmablast'
+B IN,'naive B cell'
+B Mem,'memory B cell'
+Mono C,
+Mono NC,
+DC

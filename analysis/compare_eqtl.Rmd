@@ -1,0 +1,870 @@
+---
+title: "compare_eqtl"
+output: html_document
+date: "2024-02-25"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(data.table)
+library(cowplot)
+library(ComplexHeatmap) # upset plot
+library(ComplexUpset)
+library(qvalue)
+library(meta) # for meta analysis
+library(glue)
+
+source("./plot/plot_funcs.R")
+source("./analysis/myfunc.R")
+
+plots_dir <- "../result/cis/figures/"
+
+fdr_val <- 0.05
+threshold <- 0.01 # express in at least 1% donors
+
+jqtlcis_dir <- "../result/cis/celltype16_new/all_celltype/"
+jqtlcis_perm_dir <- "../result/cis/celltype16_perm/all_celltype/"
+tqtlcis_dir <- "../result/cis/celltype16_tensorqtl_new/all_celltype/"
+sqtlcis_dir <- "../saigeqtl/output/"
+enrich_dir <- "../result/enrich/"
+genemeta_dir <- "../../jaxqtl_project/data/OneK1K/pheno/celltype16_new/metadata/"
+```
+
+# reference file
+
+## metadata
+
+```{r}
+source("./analysis/1_read_annotations.R")
+# source("./analysis/2_read_results_fixlist.R") # read this first if comparing other methods such saigeqtl
+source("./analysis/2_read_results.R")
+```
+
+write out lead SNP info
+```{r}
+NB_egenes_df %>% select(celltype, phenotype_id, snp, rsid, chr, pos, ref, alt, pos_38) %>% 
+  write_tsv(glue("{jqtlcis_dir}/jaxqtl_nb_leadsnp.tsv.gz"))
+
+jqtl_lm_score_egenes_df %>% select(celltype, phenotype_id, snp, rsid, chr, pos, ref, alt, pos_38) %>% 
+  write_tsv(glue("{jqtlcis_dir}/jaxqtl_lm_leadsnp.tsv.gz"))
+```
+
+randomly select 50 egenes to compare p_beta and p_acat
+```{r}
+set.seed(2024)
+genelist <- data.frame()
+for (CT in c("CD4_NC", "B_IN", "Plasma")){
+  tmp <- NB_egenes_df %>% filter(celltype == CT) %>% sample_n(50) %>% select(celltype, chr, phenotype_id)
+  genelist <- bind_rows(genelist, tmp)
+}
+genelist %>% 
+  arrange(celltype, chr) %>%
+  mutate(name = glue("{celltype}_chr{chr}")) %>% 
+  write_tsv(glue("{jqtlcis_dir}/CT3_genes_50"), col_names = F)
+```
+
+write genes with high pLI versus low pLI
+```{r}
+NB_egenes_df %>% filter(!phenotype_id %in% c(MHC_genes, MAPT_genes)) %>% 
+  filter(is.na(pLI)) %>% View
+
+```
+
+
+cell type proportion count and library size
+```{r}
+# number of cells per person
+ind_celltype_ct %>% group_by(individual) %>% 
+  summarize(n = sum(counts)) %>% summary()
+
+# number of individual per cell type
+ind_celltype_ct %>% filter(counts > 0) %>% 
+  group_by(cell_label) %>% summarize(n=n())
+```
+
+
+# Cis Results
+
+## descriptive for NB vs. tqtl and comparison
+
+```{r eGene stats}
+# total gene-cell type pairs: 225345
+# total eQTLs: 18907 vs. 16390, 16654
+NB_egenes_df %>% distinct(phenotype_id, celltype) %>% nrow()
+tqtl_egenes_df %>% distinct(phenotype_id, celltype) %>% nrow()
+pois_egenes_df %>% distinct(phenotype_id, celltype) %>% nrow() # 15634
+
+jqtl_lm_score_egenes_df %>% distinct(phenotype_id, celltype) %>% nrow()
+
+# NB vs. linear: P=1.52E-35
+(18907-16654)/16654
+prop.test(x=c(18907, 16654), n=c(225345, 225345)) %>% broom::tidy()
+# NB vs. poisson: P=5.58E-75
+(18907-15634)/15634
+prop.test(x=c(18907, 15634), n=c(225345, 225345)) %>% broom::tidy()
+
+NB_egenes_df %>% distinct(phenotype_id) # 6934
+jaxqtl_allcell_egenes_df %>% distinct(phenotype_id) %>% nrow() # 6476
+prop.test(x = c(6934, 6476), n=c(21183, 22878)) %>% broom::tidy()
+```
+
+NB identified genes in more cell types
+```{r}
+wilcox.test(NB_egenes_df %>% filter(phenotype_id %in% unique(both_hits$phenotype_id)) %>% 
+  count(phenotype_id) %>% pull(n),
+jqtl_lm_score_egenes_df %>% filter(phenotype_id %in% unique(both_hits$phenotype_id)) %>% 
+  count(phenotype_id) %>% pull(n), "t")
+```
+
+plot NB eGenes as a function of cell type proportion
+```{r eGene vs. cell type prop}
+cor(egenes_df$jaxqtl_nb, egenes_df$total_cell/sum(egenes_df$total_cell), method="spearman")
+cor(egenes_df$jaxqtl_nb, egenes_df$total_cell/sum(egenes_df$total_cell), method="pearson")
+
+egenes_df %>% 
+  rename(eGene = jaxqtl_nb) %>% 
+  mutate(prop = total_cell/sum(total_cell)) %>% 
+  ggplot(aes(x = prop, y = eGene)) +
+  geom_point(aes(color = cell)) + geom_smooth(method="lm", linewidth=0.6)+
+  # scale_size_area(max_size = 3)+
+  scale_color_manual(values = celltype_cols)+
+  axis_theme+xlab("cell type proportion")+
+  theme(
+  legend.key.size = unit(0.2, "cm"),
+  legend.text = element_text(size = 5),  # Adjust legend text size
+  legend.title = element_text(size = 5)  # Adjust legend title size
+)+guides(color=guide_legend(title="cell type"))
+
+ggsave2(paste0(plots_dir, "NB_cisgenes_cellcounts.png"),
+    width = onecol_width*1.1, height = onecol_height, units = 'cm', dpi = 300)
+
+```
+
+```{r eGene metrics}
+# unique eGenes: 6934 vs. 6282, 6433
+length(unique(NB_geneset))
+length(unique(tqtl_geneset))
+length(unique(jqtl_lm_score_egenes_df$phenotype_id))
+
+# types of eGene: 5738 protein coding, 566 lincRNA
+NB_egenes_df %>% distinct(phenotype_id) %>% 
+  left_join(gtf, by = "phenotype_id") %>% 
+  group_by(gene_type) %>% summarize(n=n())
+
+egenes_df %>% select(cell, jaxqtl_nb, tqtl, p_diff_nb_tqtl) %>% filter(p_diff_nb_tqtl < 0.05/14)
+egenes_df %>% select(cell, jaxqtl_nb, tqtl, p_diff_nb_pois) %>% filter(p_diff_nb_pois < 0.05/14)
+
+pois_egenes_df %>% inner_join(NB_egenes_df, by=c("phenotype_id", "celltype")) %>% nrow() / nrow(NB_egenes_df)
+
+# MHC eQTLs: 25Mb-34Mb
+# NB_egenes_df %>% 
+#   mutate(pos = as.integer(pos)) %>% 
+#   filter(chrom == 6 & pos >= 25000000 & pos <= 34000000) %>% 
+#   add_count(phenotype_id, variant_id) %>% 
+#   distinct(phenotype_id, variant_id, .keep_all = T) %>% 
+#   pull(n) %>% table()
+
+# TSS
+bind_rows(tibble(method = "NegBinom", tss_dist = v1),
+          tibble(method = "tensorqtl", tss_dist = v2)) %>% 
+  ggplot(aes(x = tss_dist, fill = method)) +
+  geom_histogram(alpha = 0.7, position = 'identity') +
+  axis_theme + ggtitle(paste("TSS distance for lead eSNPs of eGenes"))
+
+ggsave2(paste0(plots_dir, "jaxqtl_tqtl_leadSNP_dist_allcelltypes.png"),
+    width = onecol_width*1.2, height = onecol_height, units = 'cm', dpi = 300)
+
+# Overall rate mean expression: lower in NB
+metric <- "express_percent"; # express_percent, rate_mean
+
+test_diff(NB_egenes_df[[metric]], 
+          jqtl_lm_score_egenes_df[[metric]], 
+          var_name = metric, method="np", alt="t", names= c("NegBinom", "tensorqtl"))
+summary(jqtl_lm_score_egenes_df[[metric]]); 
+summary(NB_egenes_df[[metric]])
+
+# private eGene: NB has lower expression percent, rate mean
+test_diff(nb_only[[metric]], 
+          both_hits[[metric]], 
+          var_name = metric, alt="t", names= c("NB", "tqtl"))
+
+test_diff(tqtl_only[[metric]], 
+          both_hits[[metric]], 
+          var_name = metric, alt="t", names= c("tqtl", "both"))
+
+test_diff(nb_only[[metric]], 
+          tqtl_only[[metric]], 
+          var_name = metric, alt="t", names= c("NB", "tqtl"))
+
+NB_all_df %>% rename(p_score_nb = pval_nominal) %>% mutate(chi2_nb=Z^2) %>% 
+  group_by(celltype) %>% mutate(qval = qvalue(pval_beta, fdr.level=0.05)$qvalue) %>% 
+  inner_join(tqtl_only %>%
+               mutate(chi2_lm = Z^2) %>% 
+               select(phenotype_id, celltype, p_score_lm = pval_nominal, chi2_lm)) %>% 
+  ggplot(aes(x = chi2_lm, y = chi2_nb, color = express_percent)) + geom_point() +
+  geom_abline(slope=1, intercept=0)
+  
+# pLI and EDS (unique genes)
+metric <- "pLI" # pLI, loeuf
+boxplot(both_hits %>% distinct(phenotype_id, .keep_all = T) %>% pull(metric), 
+        nb_only %>% distinct(phenotype_id, .keep_all = T) %>% pull(metric),
+        tqtl_only %>% distinct(phenotype_id, .keep_all = T) %>% pull(metric),
+        names = c("both", "NB_only", "tqtl_only"),
+        main = metric)
+
+wilcox.test(both_hits %>% pull(metric),
+            nb_only  %>% pull(metric), "t")
+wilcox.test(both_hits  %>% pull(metric),
+            tqtl_only  %>% pull(metric), "t")
+wilcox.test(nb_only  %>% pull(metric),
+            tqtl_only  %>% pull(metric), "t")
+
+test_diff(nb_only %>% distinct(phenotype_id, .keep_all = T) %>% pull(metric),
+            tqtl_only %>% distinct(phenotype_id, .keep_all = T) %>% pull(metric),
+          var_name = metric, alt = "l")
+
+# protein-coding or lincRNA in private gene set
+nb_only %>% distinct(phenotype_id) %>% 
+  left_join(gtf, by = "phenotype_id") %>% 
+  group_by(gene_type) %>% summarize(n=n())
+
+tqtl_only %>% distinct(phenotype_id) %>% 
+  left_join(gtf, by = "phenotype_id") %>% 
+  group_by(gene_type) %>% summarize(n=n())
+
+```
+
+compare egenes in NB results vs. tqtl (Wei), GLMM results
+```{r saigeqtl}
+# number of genes pass the 10% threshold
+saigeqtl_genes_filter <- readxl::read_excel("../ref/saigeqtl/media-1.xlsx", sheet = 1, skip = 1) %>% 
+  janitor::clean_names()
+
+# total 156415
+sum(saigeqtl_genes_filter$number_of_genes_expressed_in_10_percent_of_donors)
+
+saigeqtl_genes_filter %>% 
+  select(celltype=cell_type,
+         saigeqtl_0.1=number_of_genes_expressed_in_10_percent_of_donors) %>% 
+  left_join(egenes_df_0.01 %>% select(celltype=cell, jaxqtl_0.01 = gene_pass)) %>% 
+  left_join(egenes_df_0.1 %>% select(celltype=cell, jaxqtl_0.1 = gene_pass)) %>% 
+  gather(key = method, value = genes_pass, -celltype) %>% 
+  bind_rows(yazar_genes_pass %>% mutate(method="Yazar") %>% select(celltype, method, genes_pass)) %>% 
+  mutate(celltype = fct_relevel(celltype, celltype_order)) %>%
+  ggplot(aes(x = celltype, y = genes_pass, fill = method)) +
+  geom_bar(position = "dodge", stat="identity") +
+  ggtitle("number of genes passed in each cell type") + 
+  xlab("cell type") + ylab("number of genes passed the threshold") +
+  axis_theme+
+  theme(axis.text.x = element_text(angle=35, hjust = 1),
+        legend.position = c(0.95, 1.15),
+        legend.justification = c("right", "top"),
+        legend.box.just = "right",
+        legend.key.size = unit("0.1", "cm"),
+        legend.margin = margin(6, 6, 6, 6)
+)
+
+ggsave2(paste0(plots_dir, "genes_pass_comparison.png"),
+    width = full_width, height = full_height, units = 'cm', dpi = 300)
+
+egenes_df_0.1 %>% select(celltype=cell, jaxqtl_nb_0.1 = jaxqtl_nb) %>% 
+  left_join(egenes_df_0.01 %>% select(celltype=cell, jaxqtl_nb_0.01 = jaxqtl_nb)) %>% 
+  gather(key = method, value = eGenes, -celltype) %>% 
+  mutate(celltype = fct_relevel(celltype, celltype_order)) %>%
+  ggplot(aes(x = celltype, y = eGenes, fill = method)) +
+  geom_bar(position = "dodge", stat="identity") +
+  ggtitle("number of genes passed in each cell type") + 
+  xlab("cell type") + ylab("number of genes passed the threshold") +
+  axis_theme+
+  theme(axis.text.x = element_text(angle=35, hjust = 1),
+        legend.position = c(0.95, 0.95),
+        legend.justification = c("right", "top"),
+        legend.box.just = "right",
+        legend.key.size = unit("0.1", "cm"),
+        legend.margin = margin(6, 6, 6, 6)
+)
+ggsave2(paste0(plots_dir, "egenes_jaxqtl_0.1_0.01_comparison.png"),
+    width = full_width, height = full_height, units = 'cm', dpi = 300)
+
+
+saigeqtl_egenes <- readxl::read_excel("../ref/saigeqtl/media-1.xlsx", sheet = 6, skip = 2) %>% 
+  janitor::clean_names() %>% 
+  slice(1:28) %>% 
+  left_join(saigeqtl_genes_filter, by="cell_type") %>% 
+  mutate(method = ifelse(method == "TensorQTL", "tensorQTL (Zhou et.al)", method),
+         number_of_e_genes_fdr_0_05 = as.integer(number_of_e_genes_fdr_0_05))
+
+saigeqtl_egenes  %>% filter(method == "SAIGEQTL") %>% pull(number_of_e_genes_fdr_0_05) %>% sum()
+# 17218 eGenes
+sum(as.integer(saigeqtl_egenes %>% filter(method == "SAIGEQTL") %>% pull(number_of_e_genes_fdr_0_05)))
+
+# NB vs. poisson: P=5.58E-75
+# 10%: NB vs. saigeqtl: 11% more, P=3.11E-24
+# 10% NB vs. tensorqtl: 16% more, P=2.03E-47
+(19048-17218)/17218
+(19048-16480)/16480
+sum(egenes_df_0.1$gene_pass) # 156505
+sum(egenes_df_0.1$tqtl) # 16480
+sum(egenes_df_0.1$jaxqtl_nb) # 19048
+prop.test(x=c(19048, 17218), n=c(156505, 156415)) %>% broom::tidy()
+prop.test(x=c(19048, 16480), n=c(156505, 156505)) %>% broom::tidy()
+
+# 16330
+16330/16739
+union_set <- union(tqtl_egenes_df_0.1 %>% mutate(eqtl=paste0(celltype, "_", phenotype_id)) %>% pull(eqtl),
+          jqtl_lm_score_egenes_df_0.1 %>% mutate(eqtl=paste0(celltype, "_", phenotype_id)) %>% pull(eqtl))
+length(intersect(tqtl_egenes_df_0.1 %>% mutate(eqtl=paste0(celltype, "_", phenotype_id)) %>% pull(eqtl),
+          jqtl_lm_score_egenes_df_0.1 %>% mutate(eqtl=paste0(celltype, "_", phenotype_id)) %>% pull(eqtl)))
+16330 / length(union_set)
+
+egenes_df_0.1 %>% select(cell, gene_pass, jaxqtl_nb, tqtl) %>% 
+  gather(key = method, value = eGenes, jaxqtl_nb:tqtl) %>% 
+    mutate(method = case_when(method == "jaxqtl_nb" ~ "jaxQTL NegBinom", 
+                            method == "tqtl" ~ "tensorQTL")) %>% 
+  bind_rows(saigeqtl_egenes %>% 
+              mutate(number_of_e_genes_fdr_0_05=as.integer(number_of_e_genes_fdr_0_05)) %>% 
+              select(cell=cell_type, 
+                     gene_pass=number_of_genes_expressed_in_10_percent_of_donors,
+                     method,
+                     eGenes=number_of_e_genes_fdr_0_05)) %>% 
+  mutate(prop = eGenes/gene_pass) %>% select(method, gene_pass, cell) %>% 
+  spread(method, gene_pass) %>% 
+  mutate(diff = (`jaxQTL NegBinom` - SAIGEQTL)/SAIGEQTL) %>% pull(diff) %>% summary()
+
+# need to switch to threshold = 0.1 to compare with saigeqtl
+  
+egenes_df_0.1 %>% select(cell, gene_pass, jaxqtl_nb, tqtl) %>% 
+  gather(key = method, value = eGenes, jaxqtl_nb:tqtl) %>% 
+    mutate(method = case_when(method == "jaxqtl_nb" ~ "jaxQTL NegBinom", 
+                            method == "tqtl" ~ "tensorQTL")) %>% 
+  bind_rows(saigeqtl_egenes %>% 
+              mutate(number_of_e_genes_fdr_0_05=as.integer(number_of_e_genes_fdr_0_05)) %>% 
+              select(cell=cell_type, 
+                     gene_pass=number_of_genes_expressed_in_10_percent_of_donors,
+                     method,
+                     eGenes=number_of_e_genes_fdr_0_05)) %>% 
+  bind_rows(yazar %>%
+              filter(e_snp_rank == "eSNP1") %>% 
+              count(cell_type, name = "eGenes") %>% 
+              left_join(yazar_genes_pass %>% rename(cell_type=celltype), by="cell_type") %>% 
+              mutate(method = "Yazar et.al 2022") %>% 
+              select(cell=cell_type, gene_pass, method, eGenes)) %>% 
+  mutate(cell = fct_relevel(cell, celltype_order),
+         method = fct_relevel(method, c("jaxQTL NegBinom", "SAIGEQTL", "tensorQTL",
+                                         "Yazar et.al 2022", "tensorQTL (Zhou et.al)")), 
+         eGenes_prop = eGenes/gene_pass) %>%
+  ggplot(aes(x = cell, y = eGenes, fill = method)) +
+  geom_bar(position = "dodge", stat="identity") +
+  scale_fill_manual(values = method_cols) +
+  ggtitle("cis-eGenes across all cell types") + 
+  xlab("cell type") + 
+  ylab("number of eGenes") +
+  # ylab("proportion of eGenes in filtered genes") +
+  axis_theme+
+  theme(axis.text.x = element_text(angle=35, hjust = 1),
+        legend.position = c(.95, .95),
+        legend.justification = c("right", "top"),
+        legend.box.just = "right",
+        legend.key.size = unit(0.3, units = "cm"),
+        legend.margin = margin(6, 6, 6, 6)
+)
+
+ggsave2(paste0(plots_dir, "egenes_allsoftwares_prop_same_thresh_0.1.png"),
+    width = full_width, height = full_height, units = 'cm', dpi = 300)
+
+ggsave2(paste0(plots_dir, "egenes_jaxqtl_tqtl_saigeqtl_prop_same_thresh.png"),
+    width = full_width, height = full_height, units = 'cm', dpi = 300)
+
+
+```
+
+
+```{r compare lead eSNP in NB vs. tqtl}
+# lead eSNPs found by each method
+v1 <- NB_egenes_df %>% 
+  inner_join(both_hits %>% select(celltype, phenotype_id)) %>% 
+  anti_join(both_hits_samevar %>% select(celltype, phenotype_id)) %>% 
+  distinct(phenotype_id, snp, tss_distance) %>% pull(tss_distance) %>% abs(); summary(v1)
+v2 <- jqtl_lm_score_egenes_df %>%  # tqtl_egenes_df %>% 
+  inner_join(both_hits %>% select(celltype, phenotype_id)) %>% 
+  anti_join(both_hits_samevar %>% select(celltype, phenotype_id)) %>% 
+  distinct(phenotype_id, snp, tss_distance) %>% pull(tss_distance) %>% abs(); summary(v2)
+wilcox.test(v1, v2, "t")
+
+
+# chi2 comparison by cell type
+both_hits_samevar %>% gather(key = method, value = chi2, c(chi2_jqtl, chi2_tqtl)) %>% filter(chi2 < 100) %>% ggplot(aes(x = celltype, y = chi2, fill = method)) + geom_boxplot()
+
+# lead eSNP found by both: chi2, P=1.26E-7
+summary(both_hits_samevar[["chi2_jqtl"]])
+summary(both_hits_samevar[["chi2_tqtl"]])
+
+wilcox.test(both_hits_samevar[["chi2_jqtl"]], 
+            both_hits_samevar[["chi2_tqtl"]], "t") %>% broom::tidy()
+
+lm(chi2_jqtl ~ chi2_tqtl + rate_mean + express_percent, 
+   data=both_hits_samevar) %>% 
+  broom::tidy()
+
+both_hits_samevar %>% ggplot(aes(x = chi2_tqtl, y = chi2_jqtl)) +
+  geom_point() + axis_theme + geom_abline(intercept=0, slope=1,color="red")+
+  ggtitle("chi2 for the same eQTLs")
+
+ggsave2(paste0(plots_dir, "both_samevar_chi2.png"),
+    width = onecol_width, height = onecol_height, units = 'cm', dpi = 300)
+
+# chi2 by cell type
+p1 <- both_hits_samevar %>% 
+  gather(key = model, value = chi2, c(chi2_jqtl, chi2_lm)) %>% 
+  mutate(model = ifelse(model == "chi2_jqtl", "NegBinom", "Linear")) %>% 
+  filter(chi2 < 200) %>% 
+  ggplot(aes(x = model, y = chi2, fill = model)) + 
+  geom_boxplot(outlier.size = 0.5) + 
+  scale_fill_manual(values = method_cols)+
+  axis_theme + ylab(bquote(chi^2 ~ "statistics of lead eSNP-eGene"))+
+  theme(axis.text.x = element_text(angle=35, hjust = 1))
+
+p2 <- both_hits_samevar %>% 
+  gather(key = model, value = chi2, c(chi2_jqtl, chi2_lm)) %>% 
+  mutate(model = ifelse(model == "chi2_jqtl", "NegBinom", "Linear"),
+        celltype = fct_relevel(celltype, celltype_order)) %>% 
+  filter(chi2 < 200) %>% 
+  ggplot(aes(x = celltype, y = chi2, fill = model)) + 
+  geom_boxplot(outlier.size = 0.5) + 
+  scale_fill_manual(values = method_cols)+
+  axis_theme + ylab(bquote(chi^2 ~ "statistics of lead eSNP-eGene"))+
+  theme(axis.text.x = element_text(angle=35, hjust = 1),
+        legend.key.size = unit("0.3", "cm"))
+p2
+
+plot_grid(
+  p1 + theme(legend.position = "none"), 
+  p2, 
+  align = 'v',
+  hjust = -1, # -1
+  nrow = 1,
+  rel_heights = c(1, 1), rel_widths=c(1, 3.5), axis="l",
+  labels = c("A", "B"), label_size = 8
+)
+
+ggsave2(paste0(plots_dir, "both_samevar_chi2_celltype_trunc200.png"),
+    width = full_width, height = full_height, units = 'cm', dpi = 300)
+
+# lead eSNP concordance
+both_hits_samevar %>% 
+  ggplot(aes(x = slope_lm, y = slope_jaxqtl_wald)) +
+  geom_point(size=0.5) + 
+  geom_hline(yintercept = 0) + geom_vline(xintercept = 0)+
+  ylab("slope_NegBinom") + xlab("slope_linear") +
+  axis_theme
+
+ggsave2(paste0(plots_dir, "both_samevar_slope_NB_lm.png"),
+    width = onecol_width/1.2, height = onecol_height, units = 'cm', dpi = 300)
+
+
+# effect size difference
+p1 <- NB_egenes_df %>% ggplot(aes(x = celltype, y = abs(slope), fill=celltype)) + geom_boxplot(outlier.size=0.5) +
+  scale_fill_manual(values = celltype_cols) +axis_theme
+p2 <- jqtl_lm_score_egenes_df %>% ggplot(aes(x = celltype, y = abs(slope_wald), fill=celltype)) + geom_boxplot(outlier.size=0.5) +
+  scale_fill_manual(values = celltype_cols) +axis_theme+theme(legend.position = "bottom")
+legend <- get_legend(p2)
+plot_grid(
+  p1 + theme(legend.position = "none")+ggtitle("jaxQTL NegBinom"), 
+  p2 + theme(legend.position = "none")+ggtitle("Linear"),
+  # legend,
+  align = 'v',
+  hjust = -1, # -1
+  nrow = 3,
+  rel_heights = c(1, 1, 0.05), rel_widths=c(1, 1, 0.5),
+  labels = c("A", "B"),  label_size = 10
+)
+
+ggsave2(paste0(plots_dir, "Fig_effectsize.png"),
+        width = full_width*1.2, height = full_height*2, units = 'cm', dpi = 300)
+
+res.aov <- kruskal.test(abs(slope) ~ celltype, data = tqtl_egenes_df)
+res.aov$p.value
+```
+
+```{r cell type-specific eQTLs}
+# cell type specific eQTLs
+NB_egenes_df %>% count(phenotype_id, snp) %>% 
+  mutate(specific = ifelse(n == 1, "yes", "no")) %>% 
+  distinct(phenotype_id, snp, .keep_all = T) %>% 
+  pull(specific) %>% table()
+
+```
+
+### tss of eQTL
+
+```{r}
+tmp <- NB_egenes_df %>% 
+  add_count(phenotype_id, snp) %>% 
+  distinct(phenotype_id, snp, .keep_all = T) %>%
+  group_by(n) %>% 
+  summarize(mean_dist = mean(abs(tss_distance))) %>% 
+  rename(n_celltypes = n) %>% ungroup()
+
+lm(mean_dist~n_celltypes, data=tmp) %>% broom::tidy()
+
+tmp %>% 
+  ggplot(aes(x = n_celltypes, y = mean_dist)) + geom_point() + geom_smooth(method="lm",alpha=0.3)+
+  axis_theme
+
+ggsave2(paste0(plots_dir, "NB_tss_num_celltypes.png"),
+    width = onecol_width, height = onecol_height, units = 'cm', dpi = 300)
+
+tmp <- NB_egenes_df %>% 
+  add_count(phenotype_id, variant_id) %>% 
+  distinct(phenotype_id, variant_id, .keep_all = T) %>%
+  left_join(gene_lookup %>% select(phenotype_id, GeneSymbol), by=c("phenotype_id")) %>% 
+  left_join(loeuf_score, by=c("GeneSymbol"="gene")) %>% 
+  group_by(n) %>% 
+  summarize(mean_pLI = mean(mean_loeuf, na.rm = TRUE)) %>% 
+  rename(n_celltypes = n) %>% ungroup()
+
+tmp %>% 
+  ggplot(aes(x = n_celltypes, y = mean_pLI)) + geom_point() + geom_smooth(method="lm",alpha=0.3)+
+  ggtitle(paste("mean pLI of NegBinom eQTLs vs. number of celltypes"))+
+  axis_theme
+
+lm(mean_pLI~n_celltypes, data=tmp) %>% broom::tidy()
+
+ggsave2(paste0(plots_dir, "NB_pLI_num_celltypes.png"),
+    width = onecol_width*1.1, height = onecol_height, units = 'cm', dpi = 300)
+
+```
+
+### cell type specificity and effect size distribution
+
+```{r}
+tmp <- NB_egenes_df %>% add_count(phenotype_id, snp) %>% 
+  distinct(phenotype_id, snp, .keep_all = T)
+
+# number of cell type vs. tss distance
+p1 <- tmp %>% mutate(abs_tss_distance = abs(tss_distance)) %>% 
+  ggplot(aes(x = abs_tss_distance, y = n)) + geom_point(size=0.3) + 
+  geom_smooth(method = "lm")+
+  axis_theme
+p1
+lm(abs(tss_distance) ~ n, data=tmp) %>% broom::tidy()
+
+# effect size and TSS distance
+tmp <- NB_egenes_df %>%
+    left_join(gtf %>% select(-c(start, end)), by = c("chr", "phenotype_id")) %>% 
+  mutate(upstream = ifelse(((strand == "+" & tss_distance < 0) | (strand == "-" & tss_distance > 0)),"upstream","downstream"),
+         location = ifelse(((strand == "+" & tss_distance > 0 & abs(tss_distance) < gene_length) | 
+                                (strand == "-" & tss_distance < 0 & abs(tss_distance) < gene_length)),
+                             "transcript",
+                             upstream),
+         wts = (1/slope_se_wald)^2,
+         tss_distance = abs(tss_distance))
+
+table(tmp$location)
+
+p2 <- tmp %>% 
+  mutate(SE=slope_se_wald, abs_slope=abs(slope_wald), abs_tss_distance = abs(tss_distance)) %>% 
+  ggplot(aes(x = abs_tss_distance, y = abs_slope, color = SE)) + 
+  geom_point(size=0.5) + 
+  geom_smooth(method = "lm", aes(weight = wts)) +
+  xlab("distance to TSS") + ylab("|effect size of lead eQTL|")+
+  axis_theme
+p2
+
+ggsave2(paste0(plots_dir, "slope_tss.png"),
+        width = onecol_width, height = onecol_height, units = 'cm', dpi = 300)
+
+lm(abs_slope ~ abs(tss_distance), data=tmp %>% mutate(abs_slope = abs(slope_wald)), weights = wts) %>% 
+  broom::tidy()
+
+plot_grid(
+  p1,
+  p2, 
+  align = 'h',
+  hjust = -1, # -1
+  nrow = 1,
+  rel_heights = c(1, 1), rel_widths=c(1, 1),
+  labels = c("A", "B"),  label_size = 10
+)
+
+ggsave2(paste0(plots_dir, "rep_celltype_slope_tss.png"),
+        width = full_width, height = full_height, units = 'cm', dpi = 300)
+
+```
+
+replication of eQTL between cell types
+```{r replication eQTL between cell types}
+# eQTL (egene) with greater effect size are more likely to replicate between cell types
+tmp <- NB_egenes_df %>%
+  add_count(phenotype_id, snp) %>% 
+  group_by(n) %>% 
+  summarize(wt_mean_effect = weighted.mean(abs(slope_wald), (1/slope_se_wald)^2, na.rm = TRUE)) %>% ungroup()
+
+lm(wt_mean_effect ~ n ,data=tmp) %>% broom::tidy()
+
+tmp %>% ggplot(aes(x = n, y = wt_mean_effect)) + 
+  geom_point(size=0.5) + 
+  geom_smooth(method = "lm") +
+  axis_theme 
+
+```
+
+### eGene findings tracks with dispersion
+
+```{r}
+p_alpha_cov <- NB_all_df %>% select(celltype, phenotype_id, alpha_cov) %>% 
+  mutate(mean_alpha = mean(alpha_cov, na.rm = T)) %>% 
+  filter(alpha_cov <= 2) %>% 
+  ggplot(aes(x = alpha_cov)) +
+  geom_histogram(color="black", fill="white") + xlab("dipersion estimates") +
+  geom_vline(aes(xintercept=mean_alpha),linetype="dashed", size=1) + 
+  ggtitle("Dispersion parameters") + 
+  axis_theme
+summary(NB_all_df$alpha_cov)
+  
+p_maf <- NB_all_df %>% 
+  distinct(variant_id, .keep_all = T) %>% 
+  mutate(maf = ifelse(af > 0.5, 1 - af, af)) %>% 
+  ggplot(aes(x = maf)) + geom_histogram(color="black", fill="white") + 
+  ggtitle("MAF of lead SNPs") + 
+  geom_vline(aes(xintercept=mean(maf)),linetype="dashed", size=1) + axis_theme
+
+NB_all_df %>% 
+  distinct(variant_id, .keep_all = T) %>% 
+  mutate(maf = ifelse(af > 0.5, 1 - af, af)) %>% pull(maf) %>% summary()
+plot_grid(
+  p_alpha_cov, p_maf,
+  align = 'h',
+  hjust = -1, # -1
+  nrow = 1,
+  rel_heights = c(1, 1), rel_widths=c(1, 1), axis="b",
+  labels = c("A", "B"), label_size = 10
+)
+
+ggsave2(paste0(plots_dir, "maf_alpha_allgenes.png"),
+    width = full_width, height = full_height, units = 'cm', dpi = 300)
+
+
+# dispersion parameter by cell type
+NB_all_df %>% 
+  filter(alpha_cov <=2 ) %>%
+  ggplot(aes(x = alpha_cov)) + geom_histogram() + facet_wrap(.~celltype)
+```
+
+
+```{r}
+# downstream: towards 3' UTR
+# upstream: towards 5' UTR
+tmp <- NB_egenes_df %>%
+  left_join(gtf %>% select(-c(start, end)), by = c("chr", "phenotype_id")) %>% 
+  mutate(upstream = ifelse(((strand == "+" & tss_distance < 0) | (strand == "-" & tss_distance > 0)),"upstream","downstream"),
+         location = ifelse(((strand == "+" & tss_distance > 0 & abs(tss_distance) < gene_length) | 
+                              (strand == "-" & tss_distance < 0 & abs(tss_distance) < gene_length)),
+                           "transcript",
+                           upstream))
+
+table(tmp$location)
+tmp %>% group_by(upstream) %>% summarize(mean = mean(chi2), med = median(chi2))
+tmp %>% group_by(location) %>% summarize(mean = mean(chi2), med = median(chi2))
+
+wilcox.test(chi2 ~ location, data=tmp) %>% broom::tidy()
+
+lm(chi2 ~ abs_tss_dist, data=tmp %>%
+     mutate(abs_tss_dist=abs(tss_distance))) %>% 
+  broom::tidy()
+
+tmp %>% 
+  ggplot(aes(x = abs(tss_distance), y = chi2)) + 
+  geom_point(size=0.5) + 
+  facet_grid(.~upstream)+
+  geom_smooth(method = "lm") +
+  axis_theme + 
+  ggtitle("NB eQTL test statistics by distance to TSS")
+
+ggsave2(paste0(plots_dir, "tss_eqtlchi2_NB.png"),
+   width = full_width, height = full_height, units = 'cm', dpi = 300)
+
+```
+
+
+# Others
+
+### beta approximation shape
+
+```{r}
+# old beta vs. new beta
+NB_all_df %>% 
+  rename(pval_beta_new = pval_beta) %>% 
+  inner_join(NB_all_df_old %>% select(pval_beta_old = pval_beta,
+                                  phenotype_id, celltype),
+             by=c("phenotype_id", "celltype")) %>% 
+  ggplot(aes(x = -log10(pval_beta_old), y = -log10(pval_beta_new))) +
+  geom_point() + axis_theme + geom_abline(slope=1, intercept=0, color="red") +
+  ggtitle("-log(pval_beta) of jaxqtl NB new vs. old")
+ggsave2(paste0(plots_dir, "jaxqtl_nb_pvalbeta_newvsold_allcelltypes.png"),
+    width = onecol_width, height = onecol_height, units = 'cm', dpi = 300)
+
+NB_all_df %>% 
+  ggplot(aes(x = beta_shape1)) +
+  geom_histogram() + axis_theme +
+  ggtitle("beta shape 2")
+
+ggsave2(paste0(plots_dir, "jaxqtl_nb_beta_shape2_allcelltypes.png"),
+    width = onecol_width, height = onecol_height, units = 'cm', dpi = 300)
+
+# compare jax lm score and tqtl beta parameters
+lm_all_df %>% 
+  select(beta_shape1_jqtl = beta_shape1, 
+         beta_shape2_jqtl = beta_shape2,
+         phenotype_id, celltype) %>% 
+  inner_join(tqtl_all_df, by=c("phenotype_id", "celltype")) %>% 
+  ggplot(aes(x = beta_shape2, y = beta_shape2_jqtl)) +
+  geom_point() + axis_theme + geom_abline(slope=1, intercept=0, color="red") +
+  ggtitle("beta shape 2 of jaxqtl lm vs. tensorqtl")
+
+ggsave2(paste0(plots_dir, "jaxqtl_lm_tqtl_beta_shape2_allcelltypes.png"),
+    width = onecol_width, height = onecol_height, units = 'cm', dpi = 300)
+```
+
+<!-- ### Annotation -->
+
+<!-- ```{r} -->
+<!-- library(GenomicRanges) -->
+<!-- abc_grange <- makeGRangesFromDataFrame(abc, -->
+<!--                                           keep.extra.columns=TRUE, -->
+<!--                                           ignore.strand=TRUE, -->
+<!--                                           seqnames.field=c("chr"), -->
+<!--                                           start.field="start", -->
+<!--                                           end.field=c("end"), -->
+<!--                                           strand.field="strand", -->
+<!--                                           starts.in.df.are.0based=FALSE) -->
+
+
+<!-- both_nb_esnp_grange <- makeGRangesFromDataFrame( -->
+<!--   both_hits %>% -->
+<!--     filter(variant_id_jqtl != variant_id_tqtl) %>% -->
+<!--     separate(variant_id_jqtl, into = c("chrom_dup", "pos"), sep=":") %>% -->
+<!--     mutate(start = pos, end=pos, chrom=paste0("chr", chrom)), -->
+<!--   keep.extra.columns=TRUE, -->
+<!--   ignore.strand=TRUE, -->
+<!--   seqnames.field=c("chrom"), -->
+<!--   start.field="start", -->
+<!--   end.field=c("end"), -->
+<!--   strand.field="strand", -->
+<!--   starts.in.df.are.0based=FALSE) -->
+
+<!-- both_tqtl_esnp_grange <- makeGRangesFromDataFrame( -->
+<!--   both_hits %>% -->
+<!--     filter(variant_id_jqtl != variant_id_tqtl) %>% -->
+<!--     separate(variant_id_tqtl, into = c("chrom_dup", "pos"), sep=":") %>% -->
+<!--     mutate(start = pos, end=pos, chrom=paste0("chr", chrom)), -->
+<!--   keep.extra.columns=TRUE, -->
+<!--   ignore.strand=TRUE, -->
+<!--   seqnames.field=c("chrom"), -->
+<!--   start.field="start", -->
+<!--   end.field=c("end"), -->
+<!--   strand.field="strand", -->
+<!--   starts.in.df.are.0based=FALSE) -->
+
+<!-- nb_abc <- intersect(abc_grange, both_nb_esnp_grange) -->
+
+<!-- tqtl_abc <- intersect(abc_grange, both_tqtl_esnp_grange) -->
+
+<!-- as.data.frame(nb_abc) -->
+
+<!-- abc_grange[queryHits(findOverlaps(abc_grange, both_nb_esnp_grange, type="any")),] -->
+
+<!-- both_nb_esnp_grange[queryHits(findOverlaps(both_nb_esnp_grange, abc_grange, type="any")),] -->
+
+<!-- library(fuzzyjoin) -->
+<!-- gene_lookup %>% filter(Geneid %in% both_hits$phenotype_id) %>% -->
+<!--   add_count(GeneSymbol) %>% filter(n>1) -->
+
+<!-- abc_subset <- abc %>% -->
+<!--   left_join(gene_lookup %>% filter(Geneid %in% both_hits$phenotype_id) %>% -->
+<!--               distinct(GeneSymbol, .keep_all=T), -->
+<!--             by = c("TargetGene"="GeneSymbol")) %>% -->
+<!--   filter(!is.na(Geneid)) -->
+
+<!-- x1 <- both_hits %>% -->
+<!--     filter(variant_id_jqtl != variant_id_tqtl) %>% -->
+<!--     separate(variant_id_jqtl, into = c("chrom_dup", "pos"), sep=":") %>% -->
+<!--     mutate(pos = as.integer(pos), -->
+<!--            start = pos-1, end=pos, chrom=paste0("chr", chrom)) %>% -->
+<!--   select(celltype, phenotype_id, chrom, start, end) -->
+
+<!-- x2 <- both_hits %>% -->
+<!--     filter(variant_id_jqtl != variant_id_tqtl) %>% -->
+<!--     separate(variant_id_tqtl, into = c("chrom_dup", "pos"), sep=":") %>% -->
+<!--     mutate(pos = as.integer(pos), -->
+<!--            start = pos-1, end=pos, chrom=paste0("chr", chrom)) %>% -->
+<!--   select(celltype, phenotype_id, chrom, start, end) -->
+
+<!-- interval_inner_join(x1, abc_subset) %>% -->
+<!--   filter(celltype == "CD4_ET") %>% View -->
+
+<!-- ``` -->
+
+
+### EDS and pLI
+
+```{r}
+# higher pLI genes are more highly expressed and across multiple cell types
+pLI_df <- NB_all_df %>% 
+  group_by(pLI_decile) %>% 
+  mutate(mean_expression = mean(express_percent)) %>% 
+  ungroup() %>% 
+  distinct(phenotype_id, .keep_all = T) %>%
+  filter(!is.na(pLI)) # %>% 
+  # mutate(pLI_quartile = ntile(pLI, 10)) 
+
+lm(pLI_df$pLI~pLI_df$pLI_decile) %>% broom::tidy()
+
+pLI_df %>% 
+  ggplot(aes(x = pLI_decile, y = mean_expression)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  axis_theme +
+  ggtitle("mean expression count across binned pLI score")
+
+ggsave2(paste0(plots_dir,
+               "mean_count_vs_pLI.png"),
+        width = onecol_width, height = onecol_height, units = 'cm', dpi = 300)
+
+
+NB_egenes_df %>% 
+  add_count(phenotype_id, variant_id) %>% 
+  distinct(phenotype_id, variant_id, .keep_all = T) %>%
+  left_join(gene_lookup %>% select(phenotype_id, GeneSymbol), by=c("phenotype_id")) %>% 
+  left_join(loeuf_score, by=c("GeneSymbol"="gene")) %>% 
+  ggplot(aes(x = celltype, y = mean_loeuf)) + geom_boxplot()
+```
+
+
+# Permutation to check type I error
+
+```{r}
+cell_type <- "CD4_NC"
+model <- "lm"
+
+gene_summary <- read_tsv(paste0(genemeta_dir, cell_type, "_gene_summary.tsv.gz")) %>% rename(phenotype_id = Geneid)
+res <- fread(paste0(jqtlcis_perm_dir, "jaxqtl_allres_cis_score.newbeta.", model, ".", cell_type, ".tsv.gz"))
+
+res %>% 
+  filter(!is.na(pval_beta)) %>% 
+  mutate(pval_nominal_nc = pchisq((slope/slope_se)^2, df=1, ncp = true_nc, lower.tail=F)) %>% 
+  filter(phenotype_id %in% (gene_summary %>% filter(express_percent >= threshold) %>% pull(phenotype_id))) %>%
+  ggplot(aes(sample = -log(pval_beta))) + 
+  stat_qq(distribution = qexp, size=0.5)+
+  stat_qq_line(distribution = qexp, color = "blue")+
+  xlab("theoretical") + ylab("observed -log(p)") +
+  axis_theme + ggtitle("pval_beta from jaxqtl lm in permuted data")
+
+ggsave2(paste0(plots_dir,
+               "jaxqtl_", model, "_perm_pval_beta_CD4_NC_qqplot.png"),
+        width = onecol_width, height = onecol_height, units = 'cm', dpi = 300)
+```
+

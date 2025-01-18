@@ -1,0 +1,8 @@
+HSC_B_cell_B_cell	B cells	Bcells	/project/gazal_569/artem/Pipeline_v0.2/data/beds/Epimap_eleanor/HSC_B_cell_B_cell
+Blood_T_cell_CD4_positive__alpha_beta_T_cell	CD4+ T cells	CD4_Tcells	/project/gazal_569/artem/Pipeline_v0.2/data/beds/Epimap_eleanor/Blood_T_cell_CD4_positive__alpha_beta_T_cell
+Blood_T_cell_CD8_positive__alpha_beta_memory_T_cell	CD8+ T cells	CD8_Tcells	/project/gazal_569/artem/Pipeline_v0.2/data/beds/Epimap_eleanor/Blood_T_cell_CD8_positive__alpha_beta_memory_T_cell
+HSC_B_cell_CD1c_positive_myeloid_dendritic_cell	Dendritic cells	DC	/project/gazal_569/artem/Pipeline_v0.2/data/beds/Epimap_eleanor/HSC_B_cell_CD1c_positive_myeloid_dendritic_cell
+HSC_B_cell_CD14_positive_monocyte_female	Mono_C	Mono_C	/project/gazal_569/artem/Pipeline_v0.2/data/beds/Epimap_eleanor/HSC_B_cell_CD14_positive_monocyte_female
+HSC_B_cell_natural_killer_cell_female_adult__34_years_	NK cell	NK	/project/gazal_569/artem/Pipeline_v0.2/data/beds/Epimap_eleanor/HSC_B_cell_natural_killer_cell_female_adult__34_years_
+Blood_T_cell_mononuclear_cell_male	Mononuclear Phagocytes	PBMC	/project/gazal_569/artem/Pipeline_v0.2/data/beds/Epimap_eleanor/Blood_T_cell_mononuclear_cell_male
+Blood_T_cell_T_cell	T cells	Tcells	/project/gazal_569/artem/Pipeline_v0.2/data/beds/Epimap_eleanor/Blood_T_cell_T_cell
