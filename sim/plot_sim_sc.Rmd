@@ -1,0 +1,719 @@
+---
+title: "plot_sim_sc"
+author: "Eleanor Zhang"
+date: "`r Sys.Date()`"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+# library(qqplotr) # stat_qq_band
+library(data.table)
+library(cowplot)
+library(qvalue)
+library(glue)
+
+source("./plot/plot_funcs.R")
+plots_dir <- "../result/sim_sc/figures"
+plots_dir <- "../result/slides_pics"
+res_dir <- "../result/sim_sc"
+
+sim_method_cols <- c("SAIGE-QTL" =  "#009E73", # "#F0E442", # "#009E73",
+                     "jaxQTL-linear" = "#56B4E9", 
+                     "jaxQTL-Poisson" = "#CC79A7",
+                     "jaxQTL-negbinom" = "#D55E00",
+                     "tensorQTL" = "#0072B2")
+
+sim_theme <- theme_classic() + theme(legend.position = "bottom", 
+        strip.text.x = element_text(size = 8),
+        legend.title = element_text(size = 8),
+        legend.text = element_text(size = 8),
+        legend.key.size = unit(0.5, "cm"),
+        plot.title = element_text(size=8, color = "black"),
+        axis.text.x = element_text(size = 8),
+        axis.text.y = element_text(size = 8),
+        axis.title = element_text(size=8))
+n_sim <- 500
+
+sim_celltype <- c("CD4_NC", "B_IN", "Plasma")
+
+CT.lab3 = c(
+  `High (CD4_NC)` = bquote("High (" ~ CD4[NC] ~ ")"), 
+  `Medium (B_IN)` = bquote("Medium (" ~ B[IN] ~ ")"), 
+  `Low (Plasma)` = bquote("Low (Plasma)")
+)
+
+vlabeller <- function (variable, value) {
+  return(CT.lab3[value])
+}
+
+```
+
+## read results for Va=0 in supp
+
+```{r}
+params <- "params_add_Va0"
+allres_add <- read_tsv(glue("{res_dir}/{params}_allres.tsv")) %>% 
+  rename("jaxQTL-negbinom"="rej_nb_score", "jaxQTL-Poisson"="rej_pois_score", "jaxQTL-linear"="rej_lm_score",
+         "tensorQTL"="rej_tqtl", "SAIGE-QTL"="rej_sqtl_score")
+
+```
+
+
+## main figure
+
+Fix Va = 0.05, Vre = 0.2, maf = 0.2, 
+```{r cars}
+params <- "params_beta0"
+allres <- read_tsv(glue("{res_dir}/{params}_allres.tsv")) %>% 
+  filter(beta0 < -6) %>% 
+  rename("jaxQTL-negbinom"="rej_nb_score", "jaxQTL-Poisson"="rej_pois_score", 
+         "jaxQTL-linear"="rej_lm_score",
+         "tensorQTL"="rej_tqtl", "SAIGE-QTL"="rej_sqtl_score")
+
+allres %>% select(CT, beta0, bulk_express_percent, bulk_mean_ct, alpha) %>% View
+
+p1 <- allres %>% 
+  filter(Va < 0.0001) %>% 
+  mutate(coverage = round(bulk_express_percent*100, digits=2),
+         CT = recode(CT, 
+                     CD4_NC = "High (CD4_NC)",
+                     B_IN = "Medium (B_IN)", 
+                     Plasma = "Low (Plasma)"),
+         CT = fct_relevel(CT, c("High (CD4_NC)", "Medium (B_IN)", "Low (Plasma)"))) %>% 
+  select(CT, Va, beta0, coverage, rep, 
+         `jaxQTL-negbinom`, `jaxQTL-Poisson`, `jaxQTL-linear`, tensorQTL, `SAIGE-QTL`) %>%
+  gather(key = model, value = rej, `jaxQTL-negbinom`:`SAIGE-QTL`) %>% 
+    mutate(rej_se = ifelse(model == "SAIGE-QTL", 
+                         sqrt(rej * (1-rej) / rep), sqrt(rej * (1-rej) / n_sim))) %>% 
+  ggplot(aes(x = coverage, y = rej, color = model, group = model)) +
+  geom_line(linewidth=0.3) +
+  geom_pointrange(aes(ymin=rej-1.96*rej_se, ymax=rej+1.96*rej_se), 
+                size=0.1, position=position_dodge(0.0), linewidth=0.5) +
+  facet_grid(. ~ CT, labeller = vlabeller) + 
+  ylab("Type I error") + xlab("Coverage (%)") + ylim(0, 1)+xlim(0,100)+
+  geom_hline(yintercept = 0.05, linetype="dashed", linewidth = 0.3)+
+  scale_color_manual(values = sim_method_cols) + sim_theme + 
+    theme(legend.position.inside = "right",
+        legend.position = c(.25, .95), # for stacked plot in main figure
+        legend.justification = c("right", "top"),
+        legend.box.just = "right",
+        legend.margin = margin(6, 6, 6, 6),
+        legend.key.size = unit(0.4, units = "cm")) 
+p1
+
+p2 <- allres %>% 
+  filter(Va > 0.0001) %>% 
+  mutate(coverage = round(bulk_express_percent*100, digits=2),
+         CT = recode(CT, 
+                     CD4_NC = "High (CD4_NC)",
+                     B_IN = "Medium (B_IN)", 
+                     Plasma = "Low (Plasma)"),
+         CT = fct_relevel(CT, c("High (CD4_NC)", "Medium (B_IN)", "Low (Plasma)"))) %>% 
+  select(CT, Va, beta0, coverage, rep, 
+         `jaxQTL-negbinom`, `jaxQTL-Poisson`, `jaxQTL-linear`, tensorQTL, `SAIGE-QTL`) %>%
+  gather(key = model, value = rej, `jaxQTL-negbinom`:`SAIGE-QTL`) %>% 
+    mutate(rej_se = ifelse(model == "SAIGE-QTL", 
+                         sqrt(rej * (1-rej) / rep), sqrt(rej * (1-rej) / n_sim))) %>% 
+  ggplot(aes(x = coverage, y = rej, color = model, group = model)) +
+  geom_line(linewidth=0.3) +
+  geom_pointrange(aes(ymin=rej-1.96*rej_se, ymax=rej+1.96*rej_se), 
+                size=0.1, position=position_dodge(0.0), linewidth=0.5) +
+  facet_grid(. ~ CT, labeller = vlabeller) + 
+  ylab("Power") + xlab("Coverage (%)") + ylim(0, 1)+xlim(0,100)+
+  scale_color_manual(values = sim_method_cols) + sim_theme + 
+    theme(legend.position = "none") 
+p2
+
+# ggsave2(glue("{plots_dir}/Fig1_A.png"),
+#     width = full_width, height = full_height, units = 'cm', dpi = 300)
+# ggsave2(glue("{plots_dir}/Fig1_B.png"),
+#     width = full_width, height = full_height, units = 'cm', dpi = 300)
+
+
+plot_grid(
+  p1, p2,
+  align = 'hv',
+  hjust = -0.8,
+  # vjust = 0.1,
+  nrow = 2,
+  rel_heights = c(1, 1), rel_widths=c(1, 1), axis="b",
+  labels = c("A", "B"), label_size = 8
+)
+
+ggsave2(glue("{plots_dir}/Fig2.png"),
+    width = full_width, height = full_height*1.8, units = 'cm', dpi = 300)
+
+```
+
+
+### test difference
+```{r}
+cell <- "CD4_NC"
+tmp <- allres %>% 
+  filter(CT == cell) %>% 
+  filter(beta0 == -12 & Va > 0)
+tmp
+
+cell <- "B_IN"
+tmp <- allres %>% 
+  filter(CT == cell) %>% 
+  filter(beta0 == -12 & Va > 0)
+tmp
+
+cell <- "Plasma"
+tmp <- allres %>% 
+  filter(CT == cell) %>% 
+  filter(beta0 == -10 & Va > 0)
+tmp
+
+
+rej_nb <- tmp$negbinom; rej_nb_se2 <- rej_nb * (1-rej_nb) / n_sim
+rej_lm <- tmp$linear; rej_lm_se2 <- rej_lm * (1-rej_lm) / n_sim
+
+test_stat <- (rej_nb - rej_lm)/sqrt(sum(rej_nb_se2 + rej_lm_se2)); test_stat
+pnorm(abs(test_stat), lower.tail = F)*2
+```
+
+## Vary cis-heritability Va
+
+```{r}
+params <- "params_Va"
+allres <- read_tsv(glue("{res_dir}/{params}_allres.tsv")) %>% filter(beta0 < -6) %>% 
+  rename("negbinom"="rej_nb_score", "Poisson"="rej_pois_score", "linear"="rej_lm_score",
+         "tensorQTL"="rej_tqtl", "SAIGE-QTL"="rej_sqtl_score")
+
+allres %>% select(CT, Va, beta0, bulk_express_percent, bulk_mean_ct, negbinom, "SAIGE-QTL") %>% View
+
+for (cell in sim_celltype){
+p1 <- allres %>% 
+  filter(CT == cell) %>% 
+  filter(Va < 0.001) %>% 
+  mutate(coverage = round(bulk_express_percent*100, digits=2)) %>% 
+  mutate(Va = as.factor(Va)) %>% 
+  select(CT, Va, beta0, coverage, rep, negbinom, Poisson, linear, tensorQTL, `SAIGE-QTL`) %>%
+  gather(key = model, value = rej, negbinom:`SAIGE-QTL`) %>% 
+  mutate(rej_se = ifelse(model == "SAIGE-QTL", 
+                         sqrt(rej * (1-rej) / rep), sqrt(rej * (1-rej) / n_sim))) %>% 
+  ggplot(aes(x = coverage, y = rej, color = model, group = model)) +
+  facet_grid(.~Va)+
+  geom_hline(yintercept = 0.05, linetype = "dashed")+ 
+  geom_line(linewidth=0.3) +
+  geom_pointrange(aes(ymin=rej-1.96*rej_se, ymax=rej+1.96*rej_se), 
+                size=0.03, position=position_dodge(0.0), linewidth=0.3) +
+  ylim(0,1)+xlim(0, 100)+
+  ylab("Type I error") + xlab("Coverage (%)") +
+  scale_color_manual(values = sim_method_cols) + sim_theme
+
+assign(paste0("p1_", cell), p1)
+p1
+
+# Va and beta0
+p2 <- allres %>% 
+  filter(CT == cell) %>% 
+  filter(Va > 0.001) %>% 
+  mutate(coverage = round(bulk_express_percent*100, digits=2)) %>% 
+  mutate(Va = as.factor(Va)) %>% 
+  select(CT, Va, beta0, coverage, rep, negbinom, Poisson, linear, tensorQTL, `SAIGE-QTL`) %>%
+  gather(key = model, value = rej, negbinom:`SAIGE-QTL`) %>% 
+  mutate(rej_se = ifelse(model == "SAIGE-QTL", 
+                         sqrt(rej * (1-rej) / rep), sqrt(rej * (1-rej) / n_sim))) %>% 
+  ggplot(aes(x = coverage, y = rej, color = model, group = model)) +
+  facet_grid(.~Va)+
+  geom_line(linewidth=0.3) +
+  geom_pointrange(aes(ymin=rej-1.96*rej_se, ymax=rej+1.96*rej_se), 
+                size=0.03, position=position_dodge(0.0), linewidth=0.3) +
+  ylim(0,1.01)+xlim(0, 100) + 
+  ylab("Power") + xlab("Coverage (%)") + 
+  scale_color_manual(values = sim_method_cols) + sim_theme
+p2
+
+assign(paste0("p2_", cell), p2)
+
+# grid for B_IN
+# legend <- get_legend(p1)
+legend <- cowplot::get_plot_component(p1, 'guide-box-bottom', return_all = TRUE)
+
+grid1 <- plot_grid(
+  p1 + theme(legend.position = "none"), 
+  p2 + theme(legend.position = "none"), 
+  align = 'v',
+  hjust = -1, # -1
+  nrow = 1,
+  rel_heights = c(1, 1), rel_widths=c(1, 3), axis="l"
+)
+
+assign(paste0("grid_", cell), grid1)
+
+}
+
+plot_grid(
+  grid_CD4_NC,
+  grid_B_IN,
+  grid_Plasma,
+  legend,
+  align = 'hv',
+  hjust = -0.8,
+  # vjust = 0.1,
+  nrow = 4,
+  rel_heights = c(1, 1, 1, 0.1), rel_widths=c(1, 1, 1, 1), axis="b",
+  labels = c("A", "B", "C"), label_size = 8
+)
+
+ggsave2(glue("{plots_dir}/Fig_Va.png"),
+    width = full_width, height = full_height*2.2, units = 'cm', dpi = 300)
+
+```
+
+
+## Vary random effect Vre
+
+```{r}
+params <- "params_Vre"
+allres <- read_tsv(glue("{res_dir}/{params}_allres.tsv")) %>% filter(Vre < 2) %>% 
+  rename("negbinom"="rej_nb_score", "Poisson"="rej_pois_score", "linear"="rej_lm_score",
+         "tensorQTL"="rej_tqtl", "SAIGE-QTL"="rej_sqtl_score")
+
+allres <- bind_rows(allres, 
+                    allres %>% select(CT:nobs) %>% select(-Va) %>% 
+                      inner_join(allres_add, by=c("CT", "maf", "beta0", "Vre", "nobs")) %>% 
+                      group_by(CT, maf, beta0, Vre, nobs) %>% 
+                      slice_max(rep) %>% ungroup() %>% 
+                      distinct(CT, maf, beta0, Vre, nobs, .keep_all = T) %>% 
+                      select(colnames(allres)))
+
+allres <- bind_rows(allres %>% filter(CT == "CD4_NC" & beta0 < -8),
+                    allres %>% filter(CT != "CD4_NC"))
+
+allres %>% View
+
+allres %>% select(CT, Va, Vre, beta0, rep, bulk_express_percent, bulk_mean_ct, negbinom, "SAIGE-QTL") %>% View
+
+for (cell in sim_celltype){
+p1 <- allres %>% 
+  filter(CT == cell) %>% 
+  filter(Va < 0.001) %>% 
+  mutate(coverage = round(bulk_express_percent*100, digits=2)) %>% 
+  mutate(Vre = as.factor(Vre)) %>% 
+  select(CT, Va, Vre, beta0, coverage, rep, negbinom, Poisson, linear, tensorQTL, `SAIGE-QTL`) %>%
+  gather(key = model, value = rej, negbinom:`SAIGE-QTL`) %>% 
+  mutate(rej_se = ifelse(model == "SAIGE-QTL", 
+                         sqrt(rej * (1-rej) / rep), sqrt(rej * (1-rej) / n_sim))) %>% 
+  ggplot(aes(x = coverage, y = rej, color = model, group = model)) +
+  facet_grid(.~Vre)+
+  geom_hline(yintercept = 0.05, linetype = "dashed")+ 
+  geom_line(linewidth=0.3) +
+  geom_pointrange(aes(ymin=rej-1.96*rej_se, ymax=rej+1.96*rej_se), 
+                size=0.03, position=position_dodge(0.0), linewidth=0.3) +
+  ylim(0,1)+xlim(0, 100)+
+  ylab("Type I error") + xlab("Coverage (%)") +
+  scale_color_manual(values = sim_method_cols) + sim_theme +
+  theme(axis.text.x = element_text(angle=35))
+
+assign(paste0("p1_", cell), p1)
+p1
+
+# Va and beta0
+p2 <- allres %>% 
+  filter(CT == cell) %>% 
+  filter(Va > 0.001) %>% 
+  mutate(coverage = round(bulk_express_percent*100, digits=2)) %>% 
+  mutate(Vre = as.factor(Vre)) %>% 
+  select(CT, Va, Vre, beta0, coverage, rep, negbinom, Poisson, linear, tensorQTL, `SAIGE-QTL`) %>%
+  gather(key = model, value = rej, negbinom:`SAIGE-QTL`) %>% 
+  mutate(rej_se = ifelse(model == "SAIGE-QTL", 
+                         sqrt(rej * (1-rej) / rep), sqrt(rej * (1-rej) / n_sim))) %>% 
+  ggplot(aes(x = coverage, y = rej, color = model, group = model)) +
+  facet_grid(.~Vre)+
+  geom_line(linewidth=0.3) +
+  geom_pointrange(aes(ymin=rej-1.96*rej_se, ymax=rej+1.96*rej_se), 
+                size=0.03, position=position_dodge(0.0), linewidth=0.3) +
+  ylim(0,1.01)+xlim(0, 100) + 
+  ylab("Power") + xlab("Coverage (%)") + 
+  scale_color_manual(values = sim_method_cols) + sim_theme +
+  theme(axis.text.x = element_text(angle=35))
+p2
+
+assign(paste0("p2_", cell), p2)
+
+# grid for B_IN
+# legend <- get_legend(p1)
+legend <- cowplot::get_plot_component(p1, 'guide-box-bottom', return_all = TRUE)
+
+grid1 <- plot_grid(
+  p1 + theme(legend.position = "none"), 
+  p2 + theme(legend.position = "none"), 
+  align = 'v',
+  hjust = -1, # -1
+  nrow = 1,
+  rel_heights = c(1, 1), rel_widths=c(1, 1), axis="l"
+)
+
+assign(paste0("grid_", cell), grid1)
+
+}
+
+plot_grid(
+  grid_CD4_NC,
+  grid_B_IN,
+  grid_Plasma,
+  legend,
+  align = 'hv',
+  hjust = -0.8,
+  # vjust = 0.1,
+  nrow = 4,
+  rel_heights = c(1, 1, 1, 0.1), rel_widths=c(1, 1, 1, 1), axis="b",
+  labels = c("A", "B", "C"), label_size = 8
+)
+
+ggsave2(glue("{plots_dir}/Fig_Vre.png"),
+    width = full_width, height = full_height*2.2, units = 'cm', dpi = 300)
+
+```
+
+## Vary N
+
+```{r}
+params <- "params_N"
+allres <- read_tsv(glue("{res_dir}/{params}_allres.tsv")) %>% 
+  rename("negbinom"="rej_nb_score", "Poisson"="rej_pois_score", "linear"="rej_lm_score",
+         "tensorQTL"="rej_tqtl", "SAIGE-QTL"="rej_sqtl_score")
+
+allres <- bind_rows(allres, 
+                    allres %>% select(CT:nobs) %>% select(-Va) %>% 
+                      inner_join(allres_add, by=c("CT", "maf", "beta0", "Vre", "nobs")) %>% 
+                      group_by(CT, maf, beta0, Vre, nobs) %>% 
+                      slice_max(rep) %>% ungroup() %>% 
+                      distinct(CT, maf, beta0, Va, Vre, nobs, .keep_all = T) %>% 
+                      select(colnames(allres)))
+
+allres %>% View
+
+allres %>% filter(nobs == 50 & Va < 0.001) %>% View
+allres %>% select(CT, Va, Vre, beta0, rep, bulk_express_percent, bulk_mean_ct, negbinom, "SAIGE-QTL") %>% View
+
+for (cell in sim_celltype){
+p1 <- allres %>% 
+  filter(CT == cell) %>% 
+  filter(Va < 0.001) %>% 
+  mutate(coverage = round(bulk_express_percent*100, digits=2)) %>% 
+  mutate(nobs = as.factor(nobs)) %>% 
+  select(CT, Va, Vre, beta0, nobs, coverage, rep, negbinom, Poisson, linear, tensorQTL, `SAIGE-QTL`) %>%
+  gather(key = model, value = rej, negbinom:`SAIGE-QTL`) %>% 
+  mutate(rej_se = ifelse(model == "SAIGE-QTL", 
+                         sqrt(rej * (1-rej) / rep), sqrt(rej * (1-rej) / n_sim))) %>% 
+  ggplot(aes(x = coverage, y = rej, color = model, group = model)) +
+  facet_grid(.~nobs)+
+  geom_hline(yintercept = 0.05, linetype = "dashed")+ 
+  geom_line(linewidth=0.3) +
+  geom_pointrange(aes(ymin=rej-1.96*rej_se, ymax=rej+1.96*rej_se), 
+                size=0.03, position=position_dodge(0.0), linewidth=0.3) +
+  ylim(0,1)+xlim(0, 100)+
+  ylab("Type I error") + xlab("Coverage (%)") +
+  scale_color_manual(values = sim_method_cols) + sim_theme +
+  theme(axis.text.x = element_text(angle=35))
+
+assign(paste0("p1_", cell), p1)
+p1
+
+# Va and beta0
+p2 <- allres %>% 
+  filter(CT == cell) %>% 
+  filter(Va > 0.001) %>% 
+  mutate(coverage = round(bulk_express_percent*100, digits=2)) %>% 
+  mutate(nobs = as.factor(nobs)) %>% 
+  select(CT, Va, Vre, nobs, beta0, coverage, rep, negbinom, Poisson, linear, tensorQTL, `SAIGE-QTL`) %>%
+  gather(key = model, value = rej, negbinom:`SAIGE-QTL`) %>% 
+  mutate(rej_se = ifelse(model == "SAIGE-QTL", 
+                         sqrt(rej * (1-rej) / rep), sqrt(rej * (1-rej) / n_sim))) %>% 
+  ggplot(aes(x = coverage, y = rej, color = model, group = model)) +
+  facet_grid(.~nobs)+
+  geom_line(linewidth=0.3) +
+  geom_pointrange(aes(ymin=rej-1.96*rej_se, ymax=rej+1.96*rej_se), 
+                size=0.03, position=position_dodge(0.0), linewidth=0.3) +
+  ylim(0,1.01)+xlim(0, 100) + 
+  ylab("Power") + xlab("Coverage (%)") + 
+  scale_color_manual(values = sim_method_cols) + sim_theme +
+  theme(axis.text.x = element_text(angle=35))
+p2
+
+assign(paste0("p2_", cell), p2)
+
+# grid for B_IN
+# legend <- get_legend(p1)
+legend <- cowplot::get_plot_component(p1, 'guide-box-bottom', return_all = TRUE)
+
+grid1 <- plot_grid(
+  p1 + theme(legend.position = "none"), 
+  p2 + theme(legend.position = "none"), 
+  align = 'v',
+  hjust = -1, # -1
+  nrow = 1,
+  rel_heights = c(1, 1), rel_widths=c(1, 1), axis="l"
+)
+
+assign(paste0("grid_", cell), grid1)
+
+}
+
+plot_grid(
+  grid_CD4_NC,
+  grid_B_IN,
+  grid_Plasma,
+  legend,
+  align = 'hv',
+  hjust = -0.8,
+  # vjust = 0.1,
+  nrow = 4,
+  rel_heights = c(1, 1, 1, 0.1), rel_widths=c(1, 1, 1, 1), axis="b",
+  labels = c("A", "B", "C"), label_size = 8
+)
+
+ggsave2(glue("{plots_dir}/Fig_N.png"),
+    width = full_width, height = full_height*2.2, units = 'cm', dpi = 300)
+
+```
+
+
+## Vary MAF
+
+```{r}
+params <- "params_maf"
+allres <- read_tsv(glue("{res_dir}/{params}_allres.tsv")) %>% 
+  rename("negbinom"="rej_nb_score", "Poisson"="rej_pois_score", "linear"="rej_lm_score",
+         "tensorQTL"="rej_tqtl", "SAIGE-QTL"="rej_sqtl_score")
+
+allres <- bind_rows(allres, 
+                    allres %>% select(CT:nobs) %>% select(-Va) %>% 
+                      inner_join(allres_add, by=c("CT", "maf", "beta0", "Vre", "nobs")) %>% 
+                      group_by(CT, maf, beta0, Vre, nobs) %>% 
+                      slice_max(rep) %>% ungroup() %>% 
+                      distinct(CT, maf, beta0, Va, Vre, nobs, .keep_all = T) %>% 
+                      select(colnames(allres)))
+
+allres %>% View
+
+allres %>% filter(beta0 == -16 & nobs == 50) %>% View
+allres %>% select(CT, Va, Vre, beta0, rep, bulk_express_percent, bulk_mean_ct, negbinom, "SAIGE-QTL") %>% View
+
+for (cell in sim_celltype){
+p1 <- allres %>% 
+  filter(CT == cell) %>% 
+  filter(Va < 0.001) %>% 
+  mutate(coverage = round(bulk_express_percent*100, digits=2)) %>% 
+  mutate(maf = as.factor(maf)) %>% 
+  select(CT, Va, Vre, beta0, nobs, maf, coverage, rep, negbinom, Poisson, linear, tensorQTL, `SAIGE-QTL`) %>%
+  gather(key = model, value = rej, negbinom:`SAIGE-QTL`) %>% 
+  mutate(rej_se = ifelse(model == "SAIGE-QTL", 
+                         sqrt(rej * (1-rej) / rep), sqrt(rej * (1-rej) / n_sim))) %>% 
+  ggplot(aes(x = coverage, y = rej, color = model, group = model)) +
+  facet_grid(.~maf)+
+  geom_hline(yintercept = 0.05, linetype = "dashed")+ 
+  geom_line(linewidth=0.3) +
+  geom_pointrange(aes(ymin=rej-1.96*rej_se, ymax=rej+1.96*rej_se), 
+                size=0.03, position=position_dodge(0.0), linewidth=0.3) +
+  ylim(0,1)+xlim(0, 100)+
+  ylab("Type I error") + xlab("Coverage (%)") +
+  scale_color_manual(values = sim_method_cols) + sim_theme +
+  theme(axis.text.x = element_text(angle=35))
+
+assign(paste0("p1_", cell), p1)
+p1
+
+# Va and beta0
+p2 <- allres %>% 
+  filter(CT == cell) %>% 
+  filter(Va > 0.001) %>% 
+  mutate(coverage = round(bulk_express_percent*100, digits=2)) %>% 
+  mutate(maf = as.factor(maf)) %>% 
+  select(CT, Va, Vre, maf, nobs, beta0, coverage, rep, negbinom, Poisson, linear, tensorQTL, `SAIGE-QTL`) %>%
+  gather(key = model, value = rej, negbinom:`SAIGE-QTL`) %>% 
+  mutate(rej_se = ifelse(model == "SAIGE-QTL", 
+                         sqrt(rej * (1-rej) / rep), sqrt(rej * (1-rej) / n_sim))) %>% 
+  ggplot(aes(x = coverage, y = rej, color = model, group = model)) +
+  facet_grid(.~maf)+
+  geom_line(linewidth=0.3) +
+  geom_pointrange(aes(ymin=rej-1.96*rej_se, ymax=rej+1.96*rej_se), 
+                size=0.03, position=position_dodge(0.0), linewidth=0.3) +
+  ylim(0,1.01)+xlim(0, 100) + 
+  ylab("Power") + xlab("Coverage (%)") + 
+  scale_color_manual(values = sim_method_cols) + sim_theme +
+  theme(axis.text.x = element_text(angle=35))
+p2
+
+assign(paste0("p2_", cell), p2)
+
+# grid for B_IN
+# legend <- get_legend(p1)
+legend <- cowplot::get_plot_component(p1, 'guide-box-bottom', return_all = TRUE)
+
+grid1 <- plot_grid(
+  p1 + theme(legend.position = "none"), 
+  p2 + theme(legend.position = "none"), 
+  align = 'v',
+  hjust = -1, # -1
+  nrow = 1,
+  rel_heights = c(1, 1), rel_widths=c(1, 1), axis="l"
+)
+
+assign(paste0("grid_", cell), grid1)
+
+}
+
+plot_grid(
+  grid_CD4_NC,
+  grid_B_IN,
+  grid_Plasma,
+  legend,
+  align = 'hv',
+  hjust = -0.8,
+  # vjust = 0.1,
+  nrow = 4,
+  rel_heights = c(1, 1, 1, 0.1), rel_widths=c(1, 1, 1, 1), axis="b",
+  labels = c("A", "B", "C"), label_size = 8
+)
+
+ggsave2(glue("{plots_dir}/Fig_maf.png"),
+    width = full_width, height = full_height*2.2, units = 'cm', dpi = 300)
+
+```
+
+
+## When random effect Vre=0
+
+```{r}
+params <- "params_Vre0"
+allres <- read_tsv(glue("{res_dir}/{params}_allres.tsv")) %>% # filter(Vre < 2) %>% 
+  rename("negbinom"="rej_nb_score", "Poisson"="rej_pois_score", "linear"="rej_lm_score",
+         "tensorQTL"="rej_tqtl", "SAIGE-QTL"="rej_sqtl_score")
+
+allres %>% select(CT, Va, Vre, beta0, rep, bulk_express_percent, bulk_mean_ct, negbinom, "SAIGE-QTL", alpha) %>% View
+
+for (cell in sim_celltype){
+p1 <- allres %>% 
+  filter(CT == cell) %>% 
+  filter(Va < 0.001) %>% 
+  mutate(coverage = round(bulk_express_percent*100, digits=2)) %>% 
+  mutate(Va = as.factor(Va)) %>% 
+  select(CT, Va, beta0, coverage, rep, negbinom, Poisson, linear, tensorQTL, `SAIGE-QTL`) %>%
+  gather(key = model, value = rej, negbinom:`SAIGE-QTL`) %>% 
+  mutate(rej_se = ifelse(model == "SAIGE-QTL", 
+                         sqrt(rej * (1-rej) / rep), sqrt(rej * (1-rej) / n_sim))) %>% 
+  ggplot(aes(x = coverage, y = rej, color = model, group = model)) +
+  facet_grid(.~Va)+
+  geom_hline(yintercept = 0.05, linetype = "dashed")+ 
+  geom_line(linewidth=0.3) +
+  geom_pointrange(aes(ymin=rej-1.96*rej_se, ymax=rej+1.96*rej_se), 
+                size=0.03, position=position_dodge(0.0), linewidth=0.3) +
+  ylim(0,1)+xlim(0, 100)+
+  ylab("Type I error") + xlab("Coverage (%)") +
+  scale_color_manual(values = sim_method_cols) + sim_theme
+
+assign(paste0("p1_", cell), p1)
+p1
+
+# Va and beta0
+p2 <- allres %>% 
+  filter(CT == cell) %>% 
+  filter(Va > 0.001) %>% 
+  mutate(coverage = round(bulk_express_percent*100, digits=2)) %>% 
+  mutate(Va = as.factor(Va)) %>% 
+  select(CT, Va, beta0, coverage, rep, negbinom, Poisson, linear, tensorQTL, `SAIGE-QTL`) %>%
+  gather(key = model, value = rej, negbinom:`SAIGE-QTL`) %>% 
+  mutate(rej_se = ifelse(model == "SAIGE-QTL", 
+                         sqrt(rej * (1-rej) / rep), sqrt(rej * (1-rej) / n_sim))) %>% 
+  ggplot(aes(x = coverage, y = rej, color = model, group = model)) +
+  facet_grid(.~Va)+
+  geom_line(linewidth=0.3) +
+  geom_pointrange(aes(ymin=rej-1.96*rej_se, ymax=rej+1.96*rej_se), 
+                size=0.03, position=position_dodge(0.0), linewidth=0.3) +
+  ylim(0,1.01)+xlim(0, 100) + 
+  ylab("Power") + xlab("Coverage (%)") + 
+  scale_color_manual(values = sim_method_cols) + sim_theme
+p2
+
+assign(paste0("p2_", cell), p2)
+
+# grid for B_IN
+# legend <- get_legend(p1)
+legend <- cowplot::get_plot_component(p1, 'guide-box-bottom', return_all = TRUE)
+
+grid1 <- plot_grid(
+  p1 + theme(legend.position = "none"), 
+  p2 + theme(legend.position = "none"), 
+  align = 'v',
+  hjust = -1, # -1
+  nrow = 1,
+  rel_heights = c(1, 1), rel_widths=c(1, 3), axis="l"
+)
+
+assign(paste0("grid_", cell), grid1)
+
+}
+
+plot_grid(
+  grid_CD4_NC,
+  grid_B_IN,
+  grid_Plasma,
+  legend,
+  align = 'hv',
+  hjust = -0.8,
+  # vjust = 0.1,
+  nrow = 4,
+  rel_heights = c(1, 1, 1, 0.1), rel_widths=c(1, 1, 1, 1), axis="b",
+  labels = c("A", "B", "C"), label_size = 8
+)
+
+ggsave2(glue("{plots_dir}/Fig_Vre0.png"),
+    width = full_width, height = full_height*2.2, units = 'cm', dpi = 300)
+
+```
+
+## plot consistency of true Vre versus estimated alpha
+
+```{r}
+params <- "params_Vre0"
+allres_Vre0 <- read_tsv(glue("{res_dir}/{params}_allres.tsv")) %>% # filter(Vre < 2) %>% 
+  rename("negbinom"="rej_nb_score", "Poisson"="rej_pois_score", "linear"="rej_lm_score",
+         "tensorQTL"="rej_tqtl", "SAIGE-QTL"="rej_sqtl_score")
+
+params <- "params_Vre"
+allres_Vre <- read_tsv(glue("{res_dir}/{params}_allres.tsv")) %>% filter(Vre < 2) %>% 
+  rename("negbinom"="rej_nb_score", "Poisson"="rej_pois_score", "linear"="rej_lm_score",
+         "tensorQTL"="rej_tqtl", "SAIGE-QTL"="rej_sqtl_score")
+
+bind_rows(allres_Vre, allres_Vre0) %>% 
+  filter(maf == 0.2 & nobs == 1000 & Va == 0.05) %>% 
+  mutate(beta0 = paste0("beta0=", beta0),
+         fitted = exp(Vre) - 1,
+         beta0 = fct_relevel(beta0, paste0("beta0=", c(-16, -14, -12, -10, -8))),
+         CT = fct_relevel(CT, c("CD4_NC", "B_IN", "Plasma"))) %>% 
+  ggplot(aes(x = Vre, y = alpha)) + geom_point() +
+  geom_line(aes(x = Vre, y = alpha), linewidth=0.3) +
+  geom_point(aes(x = Vre, y = fitted), color = "blue") +
+  geom_line(aes(x = Vre, y = fitted), color = "blue", linewidth=0.3) +
+  # geom_smooth(aes(x = Vre, y = alpha), method = "loess", color = "black", linewidth=0.7) + 
+  facet_wrap(beta0~CT, scales = "free", nrow = 5) + 
+  xlab(bquote("True"~{sigma^2}[u])) + ylab("Estimatede overdispersion") # +
+ # geom_abline(slope = 1, intercept = 0, color = "grey")
+
+ggsave2(glue("{plots_dir}/Fig_trueVre_alpha.png"),
+    width = full_width, height = full_height*2.7, units = 'cm', dpi = 300)
+
+```
+
+## show overdipsersion alpha consistent with sigma^2
+
+```{r}
+sigma2 <- seq(0, 1, 0.01)
+y <- exp(sigma2) - 1
+
+tibble(x = sigma2, y = scalar) %>% 
+  ggplot(aes(x = sigma2, y = y)) +
+  geom_point() +
+  geom_abline(slope=1, intercept = 0)
+```
+

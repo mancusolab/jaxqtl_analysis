@@ -32,9 +32,10 @@ p_egene_0.01 <- egenes_df %>%
     labels = celltype_bquote_0.01
   )+
   axis_theme+
+  labs(fill="jaxQTL model") +
   theme(axis.text.x = element_text(angle=35, hjust = 1),
         # legend.position = c(.88, .95), # for single plot
-        legend.position = c(.93, .95), # for stacked plot in main figure
+        legend.position = c(.91, .95), # for stacked plot in main figure
         legend.justification = c("right", "top"),
         legend.box.just = "right",
         legend.margin = margin(6, 6, 6, 6),
@@ -42,7 +43,7 @@ p_egene_0.01 <- egenes_df %>%
 )
 p_egene_0.01
 
-ggsave2(paste0(plots_dir, "Fig5_A.png"),
+ggsave2(paste0(plots_dir, "/Fig2_A.png"),
         width = full_width, height = full_height, units = 'cm', dpi = 300)
 
 celltype_bquote_0.1 <- c("CD4_NC*" = bquote(CD4[NC]~ "*"),
@@ -64,12 +65,13 @@ p_egene_0.1 <- egenes_df_0.1 %>%
   left_join(egenes_df %>% select(cell, total_cell), by="cell") %>% 
   mutate(cell = ifelse(p_diff < 0.05/14, paste0(cell,"*"), cell),
          cell = fct_reorder(cell, desc(total_cell))) %>% 
-  gather(key = software, value = eGenes, c(jaxqtl_nb, tqtl, saige_egenes)) %>%
+  gather(key = software, value = eGenes, c(jaxqtl_nb, jaxqtl_nb_acat, tqtl, saige_egenes)) %>%
   mutate(eGenes = as.numeric(eGenes),
          software = case_when(software == "jaxqtl_nb" ~ "jaxQTL", 
+                              software == "jaxqtl_nb_acat" ~ "jaxQTL (ACAT-V)",
                               software == "saige_egenes" ~ "SAIGE-QTL",
                               software == "tqtl" ~ "tensorQTL"),
-         software = fct_relevel(as.factor(software), c("jaxQTL", "SAIGE-QTL", "tensorQTL"))) %>% 
+         software = fct_relevel(as.factor(software), c("jaxQTL", "jaxQTL (ACAT-V)", "SAIGE-QTL", "tensorQTL"))) %>% 
   ungroup() %>% 
   ggplot(aes(x = cell, y = eGenes, fill = software)) +
   geom_bar(position = "dodge", stat="identity") +
@@ -88,7 +90,7 @@ p_egene_0.1 <- egenes_df_0.1 %>%
   )
 p_egene_0.1
 
-ggsave2(paste0(plots_dir, "Fig5_B.png"),
+ggsave2(paste0(plots_dir, "/Fig2_B.png"),
         width = full_width, height = full_height, units = 'cm', dpi = 300)
 
 
@@ -102,7 +104,7 @@ plot_grid(
   labels = c("A", "B"), label_size = 10, vjust=1
 )
 
-ggsave2(paste0(plots_dir, "mainfig_egene.png"),
+ggsave2(paste0(plots_dir, "mainfig_egene_add_acat.png"),
         width = full_width, height = full_height*1.5, units = 'cm', dpi = 300)
 
 # jaxQTL-Linear and tensorQTL
