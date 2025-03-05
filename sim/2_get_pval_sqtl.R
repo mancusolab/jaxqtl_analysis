@@ -37,4 +37,3 @@ data.table::fread(paste0(opt$prefix, "_cis"), header=TRUE) %>%
          null_converged = modglmm$converged) %>% 
   write_tsv(paste0(opt$out, "_causal_snp"))
 
-
